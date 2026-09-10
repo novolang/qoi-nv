@@ -1,0 +1,300 @@
+// qoidec.nv — the decoder, in the two shapes a caller needs: a
+// feed-and-drain state machine the host pumps, and a whole-buffer call
+// for the common case.
+//
+// THE SHAPE, AND WHY IT IS THIS ONE
+//
+// `qoi-nv` is a `core` package, so its budget is no effects at all and
+// it may not read a file, a socket or standard input.  A QOI file is
+// exactly the thing a caller has in a file.  Those two facts are
+// reconciled by a FEED-AND-DRAIN STATE MACHINE: the host holds the
+// stream, hands this package whatever bytes it has, and gets back the
+// pixels those bytes produced plus a decoder to hand the next chunk
+// to.
+//
+//     var d = qoidec.decoder()
+//     let (d2, out) = qoidec.feed(d, chunk)      // as many times as you like
+//     qoidec.finish(d2)!                         // once, at end of stream
+//
+// A chunk may split ANYTHING — the header between its width and its
+// height, a `QoiOpLuma` between its two bytes, the end marker — and
+// the decoder carries whatever it could not finish into the next call.
+// `feed` returns a NEW decoder rather than mutating one, because
+// `[mutate]` is a host effect and this package has none.
+//
+// FEED-AND-DRAIN OVER PIXELS, NOT OVER EVENTS
+//
+// png-nv's decoder drains EVENTS, because a PNG carries chunks a
+// reader has to be told about and rows that arrive out of order under
+// interlacing.  A QOI file has none of that: it is a header and then a
+// flat sequence of pixels in raster order, so the drained value is
+// just the pixels, and there is nothing an event could carry that
+// `header` does not already answer.  That is the difference between
+// the second and the first of `docs/publishing.md`'s four shapes, and
+// it is the format that decides which — not a preference.
+//
+// WHY THERE IS NO `read_all`
+//
+// flate-nv and png-nv both offer an effect-polymorphic
+// `read_all<S: Read[e]>` that writes the pump once inside the package.
+// This one does not, and the reason is that it would be a convenience
+// that defeats its own purpose: a QOI file expands to
+// `w * h * channels` bytes with no compression state, so a caller who
+// cannot hold the whole INPUT certainly cannot hold the whole OUTPUT,
+// and `read_all` would build exactly that.  The caller who wants a
+// whole image in memory calls `decode`, which is honest about needing
+// the whole file too; the caller who cannot hold one uses `feed` and
+// writes their pixels somewhere as they arrive.  For png-nv the
+// arithmetic is different — a compressed file can be a hundredth of
+// its image — and that package has the function.
+//
+// WHAT `feed` DOES NOT DO
+//
+// It does not return a `Result`.  A corrupt file at pixel 40,000 does
+// not throw away the 39,999 before it, and a signature that made the
+// failure the return value would have had to choose between the pixels
+// and the reason.  The failure is sticky — `error` is what asks — and
+// once set every subsequent `feed` produces nothing.
+
+use qoi
+use qoiop
+
+// A decoder between chunks.
+//
+// Opaque in practice — the fields are here so the state is reviewable
+// rather than because a caller should read them — and carried by
+// value: `feed` returns the next one and the previous one is finished
+// with.
+//
+// The largest thing in it is the sixty-four-entry running table, which
+// is why a QOI decoder is affordable in a way almost nothing else on
+// this grid is: no window, no Huffman tables, no row history.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     println("${qoidec.total_out(qoidec.decoder())}")     // 0
+// ```
+pub struct QoiDecoder
+    // The header, once the first fourteen bytes have arrived.
+    head: ?QoiHeader
+    // The previous pixel, which every opcode is relative to.  Seeded
+    // to OPAQUE BLACK, which is not what the running table is seeded
+    // to — see `qoiop.nv`.
+    prev: Srgba8
+    // The sixty-four-entry table of recently seen pixels.
+    seen: QoiRunning
+    // Bytes consumed so far, across every `feed`.  The origin every
+    // `QoiError` offset is measured from.
+    consumed: Int
+    // Pixels produced so far, across every `feed`.
+    produced: Int
+    // How many more copies of `prev` an in-progress run still owes.  A
+    // run can be split by a chunk boundary like anything else.
+    run_left: Int
+    // Bytes of a partial opcode or a partial header carried over from
+    // the last chunk.
+    pending: Bytes
+    // How many channels the drained pixels carry: the header's, unless
+    // `with_channels` overrode it.
+    out_channels: Int
+    // The sticky failure, or absent.
+    failure: ?QoiError
+
+// A decoder at the start of a file.
+//
+// It does not know the dimensions yet — nothing does until fourteen
+// bytes have arrived — so `header` answers `None` until then.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     match qoidec.header(qoidec.decoder())
+//         Some(_) => println("known")
+//         None    => println("not yet")                    // this one
+// ```
+pub fn decoder() -> QoiDecoder
+    todo("qoi-nv.qoidec.decoder")
+
+// Drain pixels in a fixed number of channels rather than the header's.
+//
+// A caller filling an RGBA texture from a three-channel file would
+// otherwise have to widen every pixel themselves; this is where they
+// say so once.  `n` is 3 or 4 and anything else panics — it is a
+// caller's argument rather than a file's byte, so it is a program
+// error and not a `QoiError`.
+//
+// Widening fills alpha with 255.  Narrowing a four-channel file to
+// three DISCARDS alpha rather than compositing it onto anything, which
+// is the only thing a decoder can honestly do with no background
+// colour to composite against.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     let d = qoidec.with_channels(qoidec.decoder(), 4)
+//     println("${qoidec.total_out(d)}")                    // 0
+// ```
+pub fn with_channels(d: QoiDecoder, n: Int) -> QoiDecoder
+    todo("qoi-nv.qoidec.with_channels")
+
+// Hand the decoder a chunk and take the pixels it produced.
+//
+// The load-bearing call.  The returned `Bytes` is whatever finished
+// inside this chunk, in raster order, at the decoder's channel count —
+// possibly empty, which is not an end of stream but a chunk that only
+// advanced the state.  The returned decoder is the one to feed next.
+//
+// An empty chunk is legal and produces nothing.  A chunk fed to a
+// decoder that has already failed produces nothing and leaves the
+// failure alone.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     let (d, out) = qoidec.feed(qoidec.decoder(), bytes.zeros(0))
+//     println("${bytes.len(out)}")                         // 0
+// ```
+pub fn feed(d: QoiDecoder, chunk: Bytes) -> (QoiDecoder, Bytes)
+    todo("qoi-nv.qoidec.feed")
+
+// End the stream and say whether it was whole.
+//
+// This is where a file that stopped mid-opcode, a file that ran out of
+// pixels before the header's count, and a file whose end marker is
+// missing become errors — none of them can be detected while bytes are
+// still arriving.  `Ok` means the pixel count was reached exactly and
+// the eight-byte marker followed it.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     match qoidec.finish(qoidec.decoder())
+//         Ok(_)  => println("whole")
+//         Err(_) => println("not whole")                   // this one
+// ```
+pub fn finish(d: QoiDecoder) -> Result<Unit, QoiError>
+    todo("qoi-nv.qoidec.finish")
+
+// The header, once fourteen bytes have arrived.
+//
+// `None` before that.  A caller who needs the dimensions in order to
+// allocate somewhere to put the pixels feeds the first chunk, asks,
+// and then decides.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     match qoidec.header(qoidec.decoder())
+//         Some(h) => println("${h.width}")
+//         None    => println("not yet")                    // this one
+// ```
+pub fn header(d: QoiDecoder) -> ?QoiHeader
+    todo("qoi-nv.qoidec.header")
+
+// The sticky failure, if the decoder has one.
+//
+// Once set it is never cleared: a QOI opcode stream that has lost its
+// place cannot resynchronise, and a decoder that tried would be
+// inventing pixels.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     match qoidec.error(qoidec.decoder())
+//         Some(_) => println("already bad")
+//         None    => println("clean")                      // this one
+// ```
+pub fn error(d: QoiDecoder) -> ?QoiError
+    todo("qoi-nv.qoidec.error")
+
+// How many bytes have been consumed across every `feed`.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     println("${qoidec.total_in(qoidec.decoder())}")      // 0
+// ```
+pub fn total_in(d: QoiDecoder) -> Int
+    todo("qoi-nv.qoidec.total_in")
+
+// How many pixels have been produced across every `feed`.
+//
+// Pixels, not bytes: the byte count is this times the channel count,
+// and the pixel count is the one that can be compared with the
+// header's promise.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     println("${qoidec.total_out(qoidec.decoder())}")     // 0
+// ```
+pub fn total_out(d: QoiDecoder) -> Int
+    todo("qoi-nv.qoidec.total_out")
+
+// Whether the decoder has reached the header's pixel count.
+//
+// True before `finish` has been called and before the end marker has
+// been seen — it is a statement about the pixels, not about the file.
+// A caller streaming into a fixed buffer uses it to stop.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     println("${qoidec.is_done(qoidec.decoder())}")       // false
+// ```
+pub fn is_done(d: QoiDecoder) -> Bool
+    todo("qoi-nv.qoidec.is_done")
+
+// Decode a whole file held in memory.
+//
+// The common case, and the one almost every caller wants: QOI files
+// are small by design and a whole-buffer decode is a straight line
+// through them.  The header comes back beside the pixels because a
+// caller needs the dimensions to make sense of a flat buffer, and
+// because the informative colorspace byte would otherwise be lost.
+//
+// Everything `finish` checks is checked here — truncation, the pixel
+// count, the end marker, trailing bytes — so an `Ok` from this
+// function is a stronger statement than a sequence of successful
+// `feed` calls.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     match qoidec.decode(bytes.zeros(0))
+//         Ok(_)  => println("decoded")
+//         Err(_) => println("not a QOI file")              // this one
+// ```
+pub fn decode(src: Bytes) -> Result<(QoiHeader, Bytes), QoiError>
+    todo("qoi-nv.qoidec.decode")
+
+// Read just the header out of a buffer.
+//
+// Fourteen bytes is all it touches, so a caller deciding whether to
+// commit memory to an image asks this first.  It validates the magic,
+// both enumerated bytes and the dimensions, which means an `Ok` here
+// is a promise that `qoi.max_encoded_size` and `qoi.decoded_size` will
+// not overflow.
+//
+// ```novo
+// use qoidec
+//
+// fn main() [io]
+//     match qoidec.read_header(bytes.zeros(14))
+//         Ok(_)  => println("read")
+//         Err(_) => println("not a QOI header")            // this one
+// ```
+pub fn read_header(src: Bytes) -> Result<QoiHeader, QoiError>
+    todo("qoi-nv.qoidec.read_header")

@@ -1,0 +1,134 @@
+// qoierror.nv — every way a QOI file can refuse to be read or
+// written, and where in the stream it happened.
+//
+// WHY EVERY VARIANT CARRIES AN OFFSET
+//
+// A QOI file is not a thing a person edited, so a line number has no
+// meaning here.  What a person debugging one has is a byte offset they
+// can `xxd -s` to, and a decoder that reported a reason without one
+// has told them to bisect the file by hand.  Offsets are counted from
+// the first byte of the file, across every chunk, because a caller
+// feeding 64 KiB at a time does not know where a chunk started either.
+//
+// WHY THERE ARE SO FEW OF THEM
+//
+// QOI has one page of specification and no options, so almost nothing
+// about a file can be wrong: the magic, the two enumerated bytes, the
+// dimensions, and whether the stream ended where the pixel count and
+// the end marker say it should.  Every opcode is valid — all 256 byte
+// values decode to something — which is worth stating because it means
+// **a corrupt QOI file usually decodes to a plausible image rather
+// than to an error**.  The end marker and the pixel count are the only
+// integrity checks the format has, and neither is a checksum.  A
+// caller who needs to know that a file is intact needs a checksum of
+// their own; this package will not pretend to give them one.
+//
+// The variants are prefixed `Qoi…` because a variant constructor
+// resolves by NAME across the whole assembly rather than by the type
+// an expression requires, so an unprefixed `TruncatedStream` here
+// would collide with the first other codec that wanted one.
+
+// Why a QOI file could not be read, or written.
+//
+// ```novo
+// use qoierror
+//
+// fn main() [io]
+//     println("${qoierror.offset_of(QoiBadMagic(0, 0))}")      // 0
+// ```
+pub enum QoiError
+    // The first four bytes were not `qoif`.  `saw` is the 32-bit value
+    // that was there, so a caller can recognise the common
+    // near-misses: a PNG signature, a JPEG marker, HTML from a proxy.
+    QoiBadMagic(offset: Int, saw: Int)
+    // The channels byte was not 3 or 4.  Carried rather than clamped:
+    // a file claiming five channels is not a QOI file, and decoding it
+    // as four would produce a plausible image out of something that is
+    // not one.
+    QoiBadChannels(offset: Int, saw: Int)
+    // The colorspace byte was not 0 or 1.  Refused even though the
+    // byte is purely informative and changes nothing about the
+    // decoding — because a file that disagrees with the specification
+    // in a field nothing reads is a file that was not written by a QOI
+    // encoder, and the caller should hear about it before the pixels.
+    QoiBadColorspace(offset: Int, saw: Int)
+    // A width or height of zero.  A header with no pixels in it is
+    // valid as fourteen bytes and has no possible body, so the failure
+    // belongs here rather than somewhere later and stranger.
+    QoiZeroDimension(offset: Int, width: Int, height: Int)
+    // Dimensions whose product does not fit the arithmetic this
+    // package does on it.  QOI's fields hold up to 4,294,967,295 in
+    // each direction, and the product of two of those is not a number
+    // any buffer size can be computed from — so the refusal is here,
+    // once, and every size calculation afterwards is safe by
+    // construction.
+    QoiTooManyPixels(offset: Int, width: Int, height: Int)
+    // Fewer than fourteen bytes: the header itself was cut short.
+    QoiTruncatedHeader(offset: Int, len: Int)
+    // The stream ended in the middle of an opcode, or before the
+    // header's pixel count was reached.  `want` is how many pixels the
+    // header promised and `got` how many arrived — the pair is the
+    // whole diagnosis, because a file one pixel short is a truncation
+    // and one that is half short is something else.
+    QoiTruncatedStream(offset: Int, want: Int, got: Int)
+    // The pixel count was reached and the eight-byte end marker was
+    // not there.  Distinct from a truncation because the pixels are
+    // all present and usable: a caller recovering a damaged file wants
+    // them, and this is the variant that says the image is complete
+    // and the file is not.
+    QoiMissingEndMarker(offset: Int)
+    // Bytes after the end marker.  Lenient is not the default here —
+    // unlike gzip, QOI has no concept of concatenated members, so
+    // anything after the marker means the file is not what it claims.
+    QoiTrailingBytes(offset: Int, count: Int)
+    // More pixels arrived than the header promised.  The decoder stops
+    // at the promised count and reports this rather than growing its
+    // output, which is what stops a hostile file from turning fourteen
+    // bytes of header into an unbounded allocation.
+    QoiOutputTooLarge(offset: Int, cap: Int)
+    // The encoder's output buffer ran out.  `need` is the size
+    // `qoi.max_encoded_size` would have said and `have` is what was
+    // supplied — a caller who used that function cannot reach this,
+    // which is what makes it a size error rather than a data one.
+    QoiBufferTooSmall(offset: Int, need: Int, have: Int)
+
+// `Result<T, QoiError>` requires this impl — SPEC § 3.4 makes `Error`
+// the bound on a result's error type — so it exists whether or not an
+// interface release has anything to say yet.
+impl Error for QoiError
+    // Panics with `not implemented` until the bodies land.
+    fn message(self) -> Str
+        todo("qoi-nv.QoiError.message")
+
+// The 0-based offset into the file the error is about.
+//
+// Every variant has one, because every way a QOI file can be wrong is
+// a place in it — there is no equivalent of a compression level chosen
+// before any byte existed.
+//
+// ```novo
+// use qoierror
+//
+// fn main() [io]
+//     println("${qoierror.offset_of(QoiMissingEndMarker(1024))}")  // 1024
+// ```
+pub fn offset_of(e: QoiError) -> Int
+    todo("qoi-nv.qoierror.offset_of")
+
+// Whether the pixels decoded so far are usable despite the error.
+//
+// True for `QoiMissingEndMarker` and `QoiTrailingBytes` — the image is
+// complete and the framing around it is not — and false for
+// everything else.  The distinction is what a caller recovering a
+// damaged file needs, and it is the only recovery advice this package
+// can honestly give, because QOI has no checksum and a corrupt opcode
+// stream decodes to a plausible image rather than to an error.
+//
+// ```novo
+// use qoierror
+//
+// fn main() [io]
+//     println("${qoierror.image_is_complete(QoiMissingEndMarker(8))}")  // true
+// ```
+pub fn image_is_complete(e: QoiError) -> Bool
+    todo("qoi-nv.qoierror.image_is_complete")

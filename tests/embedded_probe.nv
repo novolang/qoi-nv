@@ -1,0 +1,55 @@
+// embedded_probe.nv — the package's device claim, as firmware that
+// either builds for a Cortex-M or does not.
+//
+// WHY A QOI CODEC MAKES A DEVICE CLAIM AT ALL
+//
+// QOI's state is a sixty-four-entry table, one previous pixel and a
+// handful of integers.  That is a few hundred bytes, and a decoder
+// that streams into a display's framebuffer never holds an image.  A
+// microcontroller driving a small panel from a file on a flash chip is
+// the use this format was arguably designed for, and it is the one
+// this probe is about.
+//
+// WHAT IS BEING COMPILED
+//
+// The opcode arithmetic and the running array — the parts that decide
+// bytes — and nothing that speaks `Bytes`, `Str` or `Result`.  The
+// `use` lines are the whole statement of which surface is being
+// claimed.  If this file does not link, the audit's `core-embedded`
+// row goes red and the README says which of those three the tier is
+// missing, which is a more useful result than a package that made no
+// claim.
+
+use qoiop
+use srgb
+
+// Advance one pixel of a decode: apply the opcode, remember the
+// result, and hand back the table.
+//
+// This IS the inner loop of a QOI decoder on a device — the table
+// lookup, the hash, the write-back — with the byte reading left to the
+// caller, who on a device is pulling one byte at a time off a SPI
+// flash rather than holding a buffer.
+@tier(embedded)
+fn step(op: QoiOp, prev: Srgba8, t: QoiRunning) -> QoiRunning
+    let px: Srgba8 = qoiop.apply(op, prev, t)
+    qoiop.remember(t, px)
+
+// The framebuffer word for the pixel at a table position.
+@tier(embedded)
+fn word_at(t: QoiRunning, at: Int) -> Int
+    srgb.pack_rgb(qoiop.recall(t, at).rgb)
+
+@tier(rt)
+fn main() [hw, time]
+    bsp.board.init()
+    let white: Srgba8 = srgb.opaque(srgb.white())
+    // Opaque white hashes to 38, so after one step the table holds it
+    // there and the framebuffer word is 0xFFFFFF.
+    let t: QoiRunning = step(QoiOpRgba(255, 255, 255, 255), white, qoiop.running_new())
+    if word_at(t, qoiop.index_of(white)) == 16777215
+        hal.uart.write("PASS: qoi-embedded\n")
+    else
+        hal.uart.write("FAIL: qoi-embedded\n")
+    loop
+        core.rt.sleep_ms(1000)

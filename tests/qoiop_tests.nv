@@ -1,0 +1,173 @@
+// qoiop_tests.nv — the API suite for the six opcodes and the running
+// array.
+//
+// RED ON PURPOSE: every body is a `todo()`.  See qoi_tests.nv for why
+// an interface package ships a failing suite.
+//
+// Every number here is the specification's, so these are the most
+// binding assertions in the package: the opcode sizes, the hash's
+// multipliers, the two disagreeing initial states, and the fact that
+// a run of 63 does not exist.
+
+use std.test
+use qoiop
+use srgb
+
+@test
+fn test_the_opcode_sizes_are_one_two_four_and_five() [io]
+    test.case("the four two-bit-tagged opcodes are one byte")
+    test.assert(qoiop.op_size(QoiOpIndex(0)) == 1)
+    test.assert(qoiop.op_size(QoiOpDiff(0, 0, 0)) == 1)
+    test.assert(qoiop.op_size(QoiOpRun(1)) == 1)
+
+    test.case("luma carries a second byte")
+    test.assert(qoiop.op_size(QoiOpLuma(0, 0, 0)) == 2)
+
+    test.case("and the two eight-bit-tagged ones carry their literals")
+    test.assert(qoiop.op_size(QoiOpRgb(0, 0, 0)) == 4)
+    test.assert(qoiop.op_size(QoiOpRgba(0, 0, 0, 0)) == 5)
+
+@test
+fn test_only_a_run_produces_more_than_one_pixel() [io]
+    test.case("a run produces its length")
+    test.assert(qoiop.op_pixels(QoiOpRun(62)) == 62)
+
+    test.case("and everything else produces exactly one")
+    test.assert(qoiop.op_pixels(QoiOpIndex(0)) == 1)
+    test.assert(qoiop.op_pixels(QoiOpRgba(0, 0, 0, 0)) == 1)
+
+@test
+fn test_the_opcode_names_are_the_specifications_own() [io]
+    test.case("with the QOI_OP_ prefix dropped")
+    test.assert(qoiop.op_name(QoiOpIndex(0)) == "index")
+    test.assert(qoiop.op_name(QoiOpDiff(0, 0, 0)) == "diff")
+    test.assert(qoiop.op_name(QoiOpLuma(0, 0, 0)) == "luma")
+    test.assert(qoiop.op_name(QoiOpRun(1)) == "run")
+    test.assert(qoiop.op_name(QoiOpRgb(0, 0, 0)) == "rgb")
+    test.assert(qoiop.op_name(QoiOpRgba(0, 0, 0, 0)) == "rgba")
+
+@test
+fn test_the_hash_is_three_five_seven_eleven_modulo_sixty_four() [io]
+    test.case("the all-zero pixel hashes to 0")
+    test.assert(qoiop.index_of(srgb.transparent()) == 0)
+
+    test.case("opaque black is 255 * 11 mod 64, which is 53")
+    test.assert(qoiop.index_of(srgb.opaque(srgb.black())) == 53)
+
+    test.case("opaque white is (255*3 + 255*5 + 255*7 + 255*11) mod 64, which is 38")
+    test.assert(qoiop.index_of(srgb.opaque(srgb.white())) == 38)
+
+@test
+fn test_a_hash_is_always_inside_the_table() [io]
+    test.case("six bits, so nothing can name a position outside it")
+    test.assert(qoiop.index_of(srgb.opaque(Srgb8 { r: 200, g: 100, b: 50 })) < 64)
+    test.assert(qoiop.index_of(srgb.opaque(Srgb8 { r: 1, g: 2, b: 3 })) >= 0)
+
+@test
+fn test_the_table_has_sixty_four_transparent_entries() [io]
+    test.case("the length is fixed by the six-bit index")
+    test.assert(qoiop.running_len() == 64)
+
+    test.case("and every entry starts fully transparent")
+    let t = qoiop.running_new()
+    test.assert(qoiop.recall(t, 0).a == 0)
+    test.assert(qoiop.recall(t, 53).a == 0)
+    test.assert(qoiop.recall(t, 63).a == 0)
+
+    test.case("which is NOT what the previous-pixel register starts at")
+    test.assert(qoiop.recall(t, 0).rgb.r == srgb.opaque(srgb.black()).rgb.r)
+    test.assert(qoiop.recall(t, 0).a != srgb.opaque(srgb.black()).a)
+
+@test
+fn test_remember_writes_a_pixel_at_its_own_hash() [io]
+    test.case("and recall reads it back from there")
+    let px = srgb.opaque(srgb.white())
+    let t = qoiop.remember(qoiop.running_new(), px)
+    test.assert(srgb.same_pixel(qoiop.recall(t, qoiop.index_of(px)), px))
+
+    test.case("and leaves every other position alone")
+    test.assert(qoiop.recall(t, 0).a == 0)
+
+@test
+fn test_applying_an_index_opcode_reads_the_table() [io]
+    test.case("the pixel at the named position")
+    let px = srgb.opaque(srgb.white())
+    let t = qoiop.remember(qoiop.running_new(), px)
+    let got = qoiop.apply(QoiOpIndex(qoiop.index_of(px)), srgb.transparent(), t)
+    test.assert(srgb.same_pixel(got, px))
+
+@test
+fn test_applying_a_run_answers_the_previous_pixel() [io]
+    test.case("one value however many times it repeats")
+    let prev = srgb.opaque(srgb.white())
+    test.assert(srgb.same_pixel(qoiop.apply(QoiOpRun(9), prev, qoiop.running_new()), prev))
+
+@test
+fn test_applying_a_literal_ignores_the_previous_pixel_and_the_table() [io]
+    test.case("rgba carries everything it needs")
+    let got = qoiop.apply(QoiOpRgba(1, 2, 3, 4), srgb.opaque(srgb.white()), qoiop.running_new())
+    test.assert(got.rgb.r == 1 and got.a == 4)
+
+    test.case("and rgb takes its alpha from the previous pixel")
+    let kept = qoiop.apply(QoiOpRgb(1, 2, 3), srgb.with_alpha(srgb.black(), 77), qoiop.running_new())
+    test.assert(kept.rgb.r == 1 and kept.a == 77)
+
+@test
+fn test_choose_prefers_the_table_over_a_difference() [io]
+    test.case("a pixel already in the table is one byte")
+    let px = srgb.opaque(srgb.white())
+    let t = qoiop.remember(qoiop.running_new(), px)
+    test.assert(qoiop.op_name(qoiop.choose(px, srgb.transparent(), t)) == "index")
+
+@test
+fn test_choose_falls_back_through_diff_and_luma_to_a_literal() [io]
+    test.case("a small change is a diff")
+    let prev = srgb.opaque(Srgb8 { r: 100, g: 100, b: 100 })
+    let near = srgb.opaque(Srgb8 { r: 101, g: 100, b: 99 })
+    test.assert(qoiop.op_name(qoiop.choose(near, prev, qoiop.running_new())) == "diff")
+
+    test.case("a larger one that still tracks green is a luma")
+    let mid = srgb.opaque(Srgb8 { r: 120, g: 120, b: 120 })
+    test.assert(qoiop.op_name(qoiop.choose(mid, prev, qoiop.running_new())) == "luma")
+
+    test.case("a change of alpha is always a literal rgba")
+    let clear = srgb.with_alpha(Srgb8 { r: 100, g: 100, b: 100 }, 7)
+    test.assert(qoiop.op_name(qoiop.choose(clear, prev, qoiop.running_new())) == "rgba")
+
+@test
+fn test_reading_an_opcode_out_of_too_few_bytes_answers_none() [io]
+    test.case("which is what makes read_op usable on a partial buffer")
+    match qoiop.read_op(bytes.zeros(0), 0)
+        Some(_) => test.fail("an opcode was read out of nothing")
+        None    => test.assert(true)
+
+@test
+fn test_write_op_then_read_op_is_the_identity() [io]
+    test.case("a run survives the round trip")
+    let (buf, at) = qoiop.write_op(QoiOpRun(5), bytes.zeros(8), 0)
+    test.assert(at == 1)
+    match qoiop.read_op(buf, 0)
+        Some(QoiOpRun(n)) => test.assert(n == 5)
+        Some(_)           => test.fail("a run read back as another opcode")
+        None              => test.fail("a written opcode could not be read")
+
+    test.case("and so does a literal with alpha")
+    let (buf2, at2) = qoiop.write_op(QoiOpRgba(9, 8, 7, 6), bytes.zeros(8), 0)
+    test.assert(at2 == 5)
+    match qoiop.read_op(buf2, 0)
+        Some(QoiOpRgba(r, _, _, a)) => test.assert(r == 9 and a == 6)
+        Some(_)                     => test.fail("an rgba read back as another opcode")
+        None                        => test.fail("a written opcode could not be read")
+
+@test
+fn test_a_run_of_sixty_three_does_not_exist() [io]
+    test.case("63 and 64 collide with the literal tags, so the maximum is 62")
+    let (buf, _) = qoiop.write_op(QoiOpRun(62), bytes.zeros(8), 0)
+    match qoiop.read_op(buf, 0)
+        Some(QoiOpRun(n)) => test.assert(n == 62)
+        Some(_)           => test.fail("the longest run read back as another opcode")
+        None              => test.fail("the longest run could not be read")
+
+    test.case("and the two byte values a longer run would use are the literals")
+    let (lit, _) = qoiop.write_op(QoiOpRgb(0, 0, 0), bytes.zeros(8), 0)
+    test.assert(bytes.byte_at(lit, 0) == Some(254))

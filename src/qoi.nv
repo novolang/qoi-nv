@@ -1,0 +1,268 @@
+// qoi.nv — the fourteen-byte header, the two enumerations in it, and
+// the size arithmetic a caller needs before they allocate anything.
+//
+// WHY THIS PACKAGE CAN BE COMPLETE RATHER THAN A SUBSET
+//
+// The QOI specification is one page.  There are six opcodes, one
+// header, one end marker and no options at all: no compression level,
+// no filter choice, no interlacing, no ancillary chunks, no
+// extensibility.  So this interface covers the format entirely, and
+// anything an implementation of it cannot do is a defect rather than a
+// scope decision.  That is unusual enough on this grid to be worth
+// stating, and it is why qoi-nv is the package that proves the codec
+// shape before png-nv pays for it.
+//
+// THE HEADER, BYTE BY BYTE
+//
+//     0..4    magic, the four ASCII bytes `qoif`
+//     4..8    width  in pixels, unsigned 32-bit BIG-endian
+//     8..12   height in pixels, unsigned 32-bit BIG-endian
+//     12      channels: 3 or 4
+//     13      colorspace: 0 or 1
+//
+// Big-endian, which is worth saying out loud because QOI is a
+// twenty-first-century format designed on little-endian machines and
+// a reader who assumes native order gets dimensions in the billions.
+//
+// WHAT THE COLORSPACE BYTE DOES, WHICH IS NOTHING
+//
+// The specification is explicit: the colorspace byte is PURELY
+// INFORMATIVE.  It does not change how a single opcode is encoded or
+// decoded, and an encoder that swapped it would produce a
+// byte-identical file.  It is carried here because it is in the format
+// and a round trip has to preserve it, and this comment exists because
+// a reader who assumed it selected a transfer function would write a
+// decoder that is wrong in a way no test vector catches.
+
+// How many channels a QOI file's pixels carry.
+//
+// Three or four, and nothing else — the byte is refused at any other
+// value rather than clamped, because a file claiming five channels is
+// not a QOI file and guessing at it would produce a plausible image
+// out of something that is not one.
+//
+// Like the colorspace byte this is INFORMATIVE about the file's
+// contents rather than about its encoding: the opcodes are identical
+// either way, and a three-channel file simply never emits `QoiOpRgba`
+// and never changes alpha from 255.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${qoi.channel_count(QoiRgba)}")             // 4
+// ```
+pub enum QoiChannels
+    // Three channels: every pixel is opaque and alpha is never coded.
+    QoiRgb
+    // Four channels: alpha is coded and may vary.
+    QoiRgba
+
+// Which colour space the file's channels are in, informatively.
+//
+// The specification says this byte changes nothing about the encoding,
+// and this package therefore does nothing with it beyond carrying it
+// through a round trip.  A caller who wants to act on it converts with
+// color-nv, which is where a transfer function belongs.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${qoi.space_byte(QoiAllLinear)}")           // 1
+// ```
+pub enum QoiSpace
+    // 0: sRGB channels with a linear alpha.  What almost every file
+    // says, and what a screenshot or a photograph is.
+    QoiSrgbLinearAlpha
+    // 1: all channels linear.  What a normal map, a height field or a
+    // light probe is.
+    QoiAllLinear
+
+// The fourteen-byte header of a QOI file, as a value.
+//
+// A plain struct rather than an unboxed one because it is a `Result`
+// payload in `read_header` and a tuple element in `decode`, and SPEC
+// § 14.5 admits an unboxed struct in neither position.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 2, height: 2, channels: QoiRgba, space: QoiSrgbLinearAlpha }
+//     println("${qoi.pixel_count(h)}")                     // 4
+// ```
+pub struct QoiHeader
+    // Width in pixels.  Zero is refused by `read_header`: a file with
+    // no pixels in it has a valid header and no possible body, and
+    // accepting it puts the failure somewhere later and stranger.
+    width: Int
+    // Height in pixels.  Zero is refused for the same reason.
+    height: Int
+    // Three channels or four.
+    channels: QoiChannels
+    // The informative colour space byte.
+    space: QoiSpace
+
+// The four ASCII bytes every QOI file starts with.
+//
+// `qoif`.  Exposed because image-nv sniffs a format from its magic and
+// should read the number from the package that owns it rather than
+// spelling it again.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${bytes.len(qoi.magic())}")                 // 4
+// ```
+pub fn magic() -> Bytes
+    todo("qoi-nv.qoi.magic")
+
+// Whether a buffer starts with QOI's magic.
+//
+// Four bytes, and it says nothing about whether the rest of the file
+// is well formed — that is `read_header`'s and the decoder's answer.
+// A buffer shorter than four bytes is not a QOI file and answers
+// false rather than panicking.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     let head = bytes.from_str("qoif")
+//     println("${qoi.is_qoi(head)}")                       // true
+// ```
+pub fn is_qoi(src: Bytes) -> Bool
+    todo("qoi-nv.qoi.is_qoi")
+
+// The eight bytes every QOI file ends with.
+//
+// Seven zero bytes and then a one.  It is a real part of the format
+// rather than padding: a decoder that stopped at the pixel count would
+// accept a truncated file whose last opcode happened to complete, and
+// the marker is what makes that detectable.  Seven zeroes cannot occur
+// by accident in the opcode stream, because a run of zero-tagged
+// `QoiOpIndex` bytes is a legal encoding and the eighth byte is what
+// separates the two readings.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${bytes.len(qoi.end_marker())}")            // 8
+// ```
+pub fn end_marker() -> Bytes
+    todo("qoi-nv.qoi.end_marker")
+
+// How many bytes a header occupies: 14, always.
+//
+// A function rather than a number a caller writes, so that the one
+// place the layout is stated is this package.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${qoi.header_size()}")                      // 14
+// ```
+pub fn header_size() -> Int
+    todo("qoi-nv.qoi.header_size")
+
+// The channel count as an integer: 3 or 4.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${qoi.channel_count(QoiRgb)}")              // 3
+// ```
+pub fn channel_count(c: QoiChannels) -> Int
+    todo("qoi-nv.qoi.channel_count")
+
+// The colour space as the byte the file carries: 0 or 1.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     println("${qoi.space_byte(QoiSrgbLinearAlpha)}")     // 0
+// ```
+pub fn space_byte(s: QoiSpace) -> Int
+    todo("qoi-nv.qoi.space_byte")
+
+// How many pixels a header describes.
+//
+// `width * height`.  It is a function because the product overflows
+// for the dimensions a 32-bit field can carry — 4,294,967,295 squared
+// does not fit in an `Int` — and `read_header` refuses a header whose
+// product would, so that every later size calculation in this package
+// is safe by construction rather than by hope.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 3, height: 4, channels: QoiRgb, space: QoiAllLinear }
+//     println("${qoi.pixel_count(h)}")                     // 12
+// ```
+pub fn pixel_count(h: QoiHeader) -> Int
+    todo("qoi-nv.qoi.pixel_count")
+
+// How many bytes the decoded pixels occupy at the header's channel
+// count.
+//
+// `width * height * channels` — the buffer a whole-image decode
+// returns, and the size a caller wanting to decode into memory they
+// own has to have ready.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 2, height: 2, channels: QoiRgba, space: QoiAllLinear }
+//     println("${qoi.decoded_size(h)}")                    // 16
+// ```
+pub fn decoded_size(h: QoiHeader) -> Int
+    todo("qoi-nv.qoi.decoded_size")
+
+// The largest a QOI file of these dimensions can be.
+//
+// `14 + width * height * (channels + 1) + 8`.  The worst case is one
+// `QoiOpRgba` per pixel — five bytes for four channels, four for
+// three — which happens for random noise and never for a photograph.
+//
+// This function is why the encoder can write into a buffer the caller
+// supplies rather than growing one: a caller allocates this much once,
+// encodes, and keeps the prefix the encoder says it filled.  For an
+// image that compresses at all the tail is wasted and the caller
+// trims it; for one that does not, nothing overflows.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgba, space: QoiAllLinear }
+//     println("${qoi.max_encoded_size(h)}")                // 27
+// ```
+pub fn max_encoded_size(h: QoiHeader) -> Int
+    todo("qoi-nv.qoi.max_encoded_size")
+
+// Write a header into a caller-supplied buffer at an offset.
+//
+// Returns the buffer with fourteen bytes written and the offset past
+// them.  The `Bytes` comes back rather than being changed in place
+// because `Bytes` has value semantics (SPEC § 4.4) and `[mutate]` is a
+// host effect this package does not have — which is the same reason
+// the encoder threads its buffer through every call.
+//
+// ```novo
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     let (buf, at) = qoi.write_header(h, bytes.zeros(14), 0)
+//     println("${at}")                                     // 14
+// ```
+pub fn write_header(h: QoiHeader, out: Bytes, at: Int) -> (Bytes, Int)
+    todo("qoi-nv.qoi.write_header")

@@ -1,0 +1,46 @@
+[package]
+name        = "qoi-nv"
+version     = "0.0.1"
+description = "The Quite OK Image format, whole: the fourteen-byte header, all six opcodes and the sixty-four-entry running array, decoded by a feed-and-drain state machine the host pumps or in one call over a buffer, and encoded into a buffer the caller supplies at a size this package can tell them exactly."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`, and the decoder is the reason the claim needs an argument at
+# all: a QOI file is exactly the thing a caller has in a file, and this
+# package will not read one.  The shape that reconciles the two is a
+# feed-and-drain state machine — the host pumps chunks in and takes
+# pixels out — and the state a decoder carries between chunks is a
+# sixty-four-entry table, a previous pixel and six integers.  Nothing
+# here reads and nothing here waits.
+layer       = "core"
+
+category    = "graphics"
+
+tags        = ["qoi", "image", "codec", "lossless", "sans-io", "encoder", "decoder", "rgba"]
+repository  = "https://github.com/novolang/qoi-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.8.9"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The whole of QOI, encoded and decoded without performing anything"
+
+[dependencies]
+# A QOI pixel IS a colour with an alpha beside it — the running array
+# is indexed by a hash of the four channels and the opcodes are
+# differences between colours — so the pixel type comes from the
+# package that owns colour rather than being declared a second time
+# here.  `core` depending on `core` is inside the layer rule.
+#
+# A PATH while this lane and color-nv are developed together; the
+# coordinator converts it to `^0.0.1` before publish, which is what the
+# registry resolves and what `novo pkg publish` requires.
+color-nv = "^0.0.1"

@@ -1,0 +1,325 @@
+// qoiop.nv — the six opcodes and the sixty-four-entry running array
+// that is the whole of QOI's compression.
+//
+// THE FORMAT, IN ONE PARAGRAPH
+//
+// A QOI body is a sequence of opcodes, each of which produces one or
+// more pixels from the pixel before it and a table of the last
+// sixty-four distinct pixels seen.  There is no entropy coding, no
+// window, no dictionary and no state beyond those two things.  That is
+// why a decoder fits in a few hundred bytes of state and why this
+// interface can cover the format completely.
+//
+// THE SIX OPCODES, AND WHY THE PLAN SAID FOUR
+//
+// Four of them are tagged by their top TWO bits, which is what leaves
+// six bits of payload in a single byte and is where the compression
+// comes from:
+//
+//     00xxxxxx  QoiOpIndex  the pixel at table position xxxxxx
+//     01rrggbb  QoiOpDiff   each channel  -2..1, biased by 2
+//     10gggggg  QoiOpLuma   green -32..31, then a byte of dr-dg, db-dg
+//     11xxxxxx  QoiOpRun    xxxxxx + 1 more copies of the last pixel
+//
+// The other two are tagged by all EIGHT bits, which is why the run
+// length above stops at 62 rather than 64:
+//
+//     11111110  QoiOpRgb    three literal bytes
+//     11111111  QoiOpRgba   four literal bytes
+//
+// `11111110` and `11111111` would otherwise be runs of 63 and 64, so
+// those two lengths do not exist and an encoder that emitted one
+// produces a file whose next pixel is read as a literal.  That single
+// interaction is the only subtle thing in the format and it is the
+// first thing an implementation gets wrong.
+//
+// THE RUNNING ARRAY IS NOT AN LRU
+//
+// The table is addressed by a HASH of the pixel, not by recency:
+//
+//     index = (r*3 + g*5 + b*7 + a*11) % 64
+//
+// A pixel is written to its hash position every time it is seen, so
+// two colours that collide evict each other repeatedly and there is no
+// list to maintain.  The multipliers are the specification's and are
+// not negotiable — they are what an encoder and a decoder agree on —
+// even though nothing about them is optimal, and a "better" hash
+// produces files nothing else can read.
+//
+// TWO INITIAL STATES THAT DISAGREE
+//
+// The running array starts as sixty-four fully transparent pixels
+// (0,0,0,0) and the PREVIOUS PIXEL starts as opaque black (0,0,0,255).
+// They are different values on purpose: a first pixel of opaque black
+// encodes as a run rather than a literal, while table position 53 —
+// which is where (0,0,0,0) hashes — starts occupied by a pixel no
+// image is likely to contain.  An implementation that seeded both the
+// same way passes on almost every image and fails on a black one.
+
+use srgb
+
+// One decoded opcode: which one it was, and what it carried.
+//
+// Produced by `read_op` and consumed by `write_op`, so that a caller
+// implementing their own loop — a debugger, a file inspector, a
+// transcoder that rewrites runs — works in the format's own vocabulary
+// rather than in bit masks.  The decoder in `qoidec.nv` does not need
+// it and does not use it; this is the format made inspectable.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.op_name(QoiOpRun(3))}")             // run
+// ```
+pub enum QoiOp
+    // `00xxxxxx` — the pixel currently at table position `at`,
+    // `0 ..= 63`.
+    QoiOpIndex(at: Int)
+    // `01rrggbb` — each channel moved by `-2 ..= 1`, alpha unchanged.
+    // The values here are the SIGNED differences, already unbiased.
+    QoiOpDiff(dr: Int, dg: Int, db: Int)
+    // `10gggggg` plus one byte — green moved by `-32 ..= 31`, red and
+    // blue by that plus `-8 ..= 7` each, alpha unchanged.  `dr` and
+    // `db` here are the signed differences of the CHANNELS, not the
+    // `dr - dg` the wire carries, because the channel difference is
+    // what a reader is thinking about.
+    QoiOpLuma(dr: Int, dg: Int, db: Int)
+    // `11xxxxxx` — `run` more copies of the previous pixel, `1 ..= 62`.
+    // 63 and 64 do not exist: their encodings are `QoiOpRgb` and
+    // `QoiOpRgba`.
+    QoiOpRun(run: Int)
+    // `11111110` plus three bytes — a literal colour, alpha unchanged
+    // from the previous pixel.
+    QoiOpRgb(r: Int, g: Int, b: Int)
+    // `11111111` plus four bytes — a literal pixel including alpha.
+    QoiOpRgba(r: Int, g: Int, b: Int, a: Int)
+
+// The name of an opcode, for a message or an inspector's output.
+//
+// `index`, `diff`, `luma`, `run`, `rgb`, `rgba` — the specification's
+// own spellings with the `QOI_OP_` prefix dropped.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.op_name(QoiOpIndex(0))}")           // index
+// ```
+pub fn op_name(op: QoiOp) -> Str
+    todo("qoi-nv.qoiop.op_name")
+
+// How many bytes an opcode occupies on the wire: 1, 2, 4 or 5.
+//
+// `QoiOpIndex`, `QoiOpDiff` and `QoiOpRun` are one byte; `QoiOpLuma`
+// is two; `QoiOpRgb` is four and `QoiOpRgba` five.  A caller sizing a
+// buffer or seeking past an opcode asks this rather than counting.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.op_size(QoiOpRgba(0, 0, 0, 0))}")   // 5
+// ```
+pub fn op_size(op: QoiOp) -> Int
+    todo("qoi-nv.qoiop.op_size")
+
+// How many pixels an opcode produces.
+//
+// One for everything except `QoiOpRun`, which produces its `run`.
+// The distinction is what makes a QOI decoder's output length
+// unpredictable from its input length, and it is why the whole-buffer
+// decoder checks the pixel count rather than trusting it.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.op_pixels(QoiOpRun(7))}")           // 7
+// ```
+pub fn op_pixels(op: QoiOp) -> Int
+    todo("qoi-nv.qoiop.op_pixels")
+
+// The table position a pixel hashes to, `0 ..= 63`.
+//
+// `(r*3 + g*5 + b*7 + a*11) % 64`.  The multipliers are the
+// specification's: an encoder and a decoder have to agree on them, so
+// a better hash is not an improvement but a different format.
+//
+// ```novo
+// use qoiop
+// use srgb
+//
+// fn main() [io]
+//     println("${qoiop.index_of(srgb.transparent())}")     // 0
+// ```
+pub fn index_of(px: Srgba8) -> Int
+    todo("qoi-nv.qoiop.index_of")
+
+// The sixty-four-entry table of recently seen pixels.
+//
+// A struct rather than a bare list so that the seeding rule — every
+// entry fully transparent, which is NOT what the previous-pixel
+// register starts at — lives in `running_new` where it cannot be
+// forgotten, and so that a caller cannot hand a table of the wrong
+// length to `recall`.
+//
+// The entries are boxed pixels rather than a flat buffer of unboxed
+// ones, which is the cost of `Srgba8` being a plain struct.  That was
+// decided in color-nv for the reason its README gives: a colour has to
+// travel through a `Result` and an optional, and SPEC § 14.5 admits an
+// unboxed struct in neither.  A device build wants the flat buffer and
+// cannot have it today.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.running_len()}")                    // 64
+// ```
+pub struct QoiRunning
+    // The table, always exactly sixty-four entries.
+    seen: [Srgba8]
+
+// A fresh table: sixty-four fully transparent pixels.
+//
+// Not opaque black.  `qoidec.decoder`'s previous-pixel register starts
+// at opaque black and this starts at (0,0,0,0), and an implementation
+// that seeded both the same way decodes almost every image correctly
+// and a black one wrongly.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.recall(qoiop.running_new(), 0).a}") // 0
+// ```
+pub fn running_new() -> QoiRunning
+    todo("qoi-nv.qoiop.running_new")
+
+// How many entries a running table has: 64, always.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.running_len()}")                    // 64
+// ```
+pub fn running_len() -> Int
+    todo("qoi-nv.qoiop.running_len")
+
+// The table with a pixel written at its own hash position.
+//
+// Every pixel an encoder or a decoder produces goes in, including one
+// that came out of the table — the specification says so, and although
+// writing a pixel back to the position it was read from is a no-op,
+// the rule is what keeps the two sides in step with no special case.
+//
+// ```novo
+// use qoiop
+// use srgb
+//
+// fn main() [io]
+//     let t = qoiop.remember(qoiop.running_new(), srgb.opaque(srgb.white()))
+//     println("${qoiop.recall(t, qoiop.index_of(srgb.opaque(srgb.white()))).a}")   // 255
+// ```
+pub fn remember(t: QoiRunning, px: Srgba8) -> QoiRunning
+    todo("qoi-nv.qoiop.remember")
+
+// The pixel at a table position.
+//
+// `at` outside `0 ..= 63` panics: a `QoiOpIndex` carries six bits and
+// cannot name a position outside the table, so an out-of-range index
+// is a caller's arithmetic error rather than a corrupt file, and
+// returning a `Result` here would put a check on the hot path of every
+// decoded pixel for a case that cannot arise from data.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     println("${qoiop.recall(qoiop.running_new(), 63).rgb.r}")    // 0
+// ```
+pub fn recall(t: QoiRunning, at: Int) -> Srgba8
+    todo("qoi-nv.qoiop.recall")
+
+// The pixel an opcode produces, given the previous pixel and the
+// table.
+//
+// The decode half of the format in one function, for a single-pixel
+// opcode.  `QoiOpRun` produces its `run` copies of `prev` and this
+// answers `prev`, because there is one pixel value however many times
+// it repeats — `op_pixels` is the count.
+//
+// ```novo
+// use qoiop
+// use srgb
+//
+// fn main() [io]
+//     let px = qoiop.apply(QoiOpRun(4), srgb.opaque(srgb.white()), qoiop.running_new())
+//     println("${px.rgb.r}")                               // 255
+// ```
+pub fn apply(op: QoiOp, prev: Srgba8, t: QoiRunning) -> Srgba8
+    todo("qoi-nv.qoiop.apply")
+
+// The shortest opcode that codes this pixel after that one.
+//
+// The encode half of the format, and the ONLY place an encoder makes a
+// choice.  The specification fixes the answer — index if the table
+// holds it, then diff, then luma, then a literal — so two conforming
+// encoders that both take the shortest option produce byte-identical
+// files for the same input, which is a stronger property than any
+// other codec on this grid has and is what makes QOI's corpus a real
+// oracle rather than a round-trip check.
+//
+// Runs are NOT chosen here: a run spans pixels and this function sees
+// one, so `qoienc.nv` is where a repeated pixel becomes a run and this
+// answers what the pixel would cost on its own.
+//
+// ```novo
+// use qoiop
+// use srgb
+//
+// fn main() [io]
+//     let same = srgb.opaque(srgb.white())
+//     println("${qoiop.op_name(qoiop.choose(same, same, qoiop.running_new()))}")   // diff
+// ```
+pub fn choose(px: Srgba8, prev: Srgba8, t: QoiRunning) -> QoiOp
+    todo("qoi-nv.qoiop.choose")
+
+// Read one opcode out of a buffer at an offset.
+//
+// `None` when fewer bytes remain than the opcode needs, which is what
+// makes this usable on a partial buffer: a caller reading a file in
+// chunks calls until it answers `None` and then feeds more.  It does
+// not distinguish "truncated" from "end of data", because at this
+// level there is no difference — `qoidec.finish` is where a stream
+// that stopped mid-opcode becomes an error.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     match qoiop.read_op(bytes.zeros(0), 0)
+//         Some(_) => println("read")
+//         None    => println("nothing there")              // this one
+// ```
+pub fn read_op(src: Bytes, at: Int) -> ?QoiOp
+    todo("qoi-nv.qoiop.read_op")
+
+// Write one opcode into a caller-supplied buffer at an offset.
+//
+// Returns the buffer and the offset past what was written.  Panics if
+// the buffer is too short: the caller sized it with
+// `qoi.max_encoded_size` and a short buffer is their arithmetic error,
+// exactly as an out-of-range `recall` is.
+//
+// ```novo
+// use qoiop
+//
+// fn main() [io]
+//     let (buf, at) = qoiop.write_op(QoiOpRun(1), bytes.zeros(8), 0)
+//     println("${at}")                                     // 1
+// ```
+pub fn write_op(op: QoiOp, out: Bytes, at: Int) -> (Bytes, Int)
+    todo("qoi-nv.qoiop.write_op")

@@ -1,0 +1,290 @@
+// qoienc.nv — the encoder: pixels in, bytes into a buffer the caller
+// supplied.
+//
+// WHY THE CALLER SUPPLIES THE BUFFER
+//
+// Every other codec on this grid returns bytes it allocated, because
+// the size of its output cannot be known before it is produced.  QOI's
+// can: `qoi.max_encoded_size` is exact, it is five bytes per pixel plus
+// twenty-two, and it is reached only by data with no structure at all.
+// So this encoder takes the buffer, which buys three things a
+// returning encoder cannot:
+//
+//   * a caller encoding a hundred frames allocates once;
+//   * an encoder writing into the middle of a larger buffer — a
+//     texture atlas, a network frame with a header already in it —
+//     needs no copy afterwards;
+//   * and nothing here has to grow anything, which is what would make
+//     the package genuinely usable on a device if `Bytes` and `Result`
+//     were available at `@tier(embedded)`.  They are not today, and
+//     the README says so rather than the interface pretending.
+//
+// The buffer is threaded through every call and handed back, because
+// `Bytes` has value semantics (SPEC § 4.4) and `[mutate]` is a host
+// effect this package does not have.  Rebinding the same name is what
+// makes that free — `docs/stdlib/bytes.md` § "The in-place rule" is
+// the whole of it.
+//
+// WHY THE ENCODER IS A STATE MACHINE AND NOT A FUNCTION
+//
+// A run spans pixels: `QoiOpRun` codes up to 62 copies of the previous
+// pixel in one byte, so an encoder that saw one pixel at a time could
+// never emit one.  `push` therefore holds a run open and only writes
+// it when the run ends — which means **`push` usually writes nothing**,
+// and a caller who stops calling without calling `finish` loses the
+// tail of their image.  `finish` is not optional and writes the open
+// run, the end marker, and nothing else.
+//
+// WHAT AN ENCODER MAY NOT CHOOSE
+//
+// Nothing.  The specification fixes the preference order — index,
+// then diff, then luma, then a literal — so two conforming encoders
+// produce byte-identical files from the same pixels.  There is no
+// level, no strategy, no window size and no heuristic anywhere in QOI,
+// which is why this package's correctness condition is byte equality
+// with the reference encoder rather than a round trip.  That is a
+// stronger oracle than anything else on this grid has.
+
+use qoi
+use srgb
+
+// An encoder between pixels.
+//
+// Carried by value like the decoder, and for the same reason: `push`
+// returns the next one.  A failed encoder stays failed and every
+// subsequent `push` writes nothing.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgba, space: QoiAllLinear }
+//     println("${qoienc.total_in(qoienc.encoder(h))}")     // 0
+// ```
+pub struct QoiEncoder
+    // The header this encoder is writing a body for.  Fixed for its
+    // life: the dimensions decide how many pixels `finish` expects.
+    head: QoiHeader
+    // The previous pixel, seeded to OPAQUE BLACK — not to the running
+    // table's transparent black.  See `qoiop.nv`.
+    prev: Srgba8
+    // The sixty-four-entry table.
+    seen: QoiRunning
+    // Pixels taken so far.
+    consumed: Int
+    // Bytes written so far, header included.
+    produced: Int
+    // How long the run currently open is, `0 ..= 62`.  A run of 62 is
+    // written immediately because 63 does not exist.
+    run_open: Int
+    // The sticky failure, or absent.
+    failure: ?QoiError
+
+// What a write left behind: the encoder to use next, the buffer, and
+// where the next byte goes.
+//
+// A named struct rather than a three-element tuple because a caller
+// threads all three through a loop and `w.at` reads better than
+// `w.2` — and because the three travel together everywhere, so naming
+// them once is cheaper than spelling the tuple at four call sites.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     let w = qoienc.start(qoienc.encoder(h), bytes.zeros(32), 0)
+//     println("${w.at}")                                   // 14
+// ```
+pub struct QoiWrite
+    // The encoder to hand the next pixel to.
+    enc: QoiEncoder
+    // The buffer, with whatever was written in it.
+    buf: Bytes
+    // The offset the next byte goes at.
+    at: Int
+
+// An encoder for an image of these dimensions.
+//
+// Nothing is written yet — `start` writes the header — so a caller who
+// is producing a body to splice into a file that already has one skips
+// `start` entirely.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 4, height: 4, channels: QoiRgba, space: QoiSrgbLinearAlpha }
+//     println("${qoienc.total_out(qoienc.encoder(h))}")    // 0
+// ```
+pub fn encoder(h: QoiHeader) -> QoiEncoder
+    todo("qoi-nv.qoienc.encoder")
+
+// Write the fourteen-byte header into the buffer.
+//
+// Separate from `encoder` so that the encoder can be built before the
+// buffer exists — a caller who sizes the buffer from
+// `qoi.max_encoded_size(h)` has the header in hand and the buffer not
+// yet.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 2, height: 2, channels: QoiRgb, space: QoiAllLinear }
+//     let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+//     println("${w.at}")                                   // 14
+// ```
+pub fn start(e: QoiEncoder, out: Bytes, at: Int) -> QoiWrite
+    todo("qoi-nv.qoienc.start")
+
+// Hand the encoder one pixel.
+//
+// **This usually writes nothing.**  A pixel equal to the one before it
+// extends the open run and produces no bytes at all; a pixel that ends
+// a run produces the run's byte and then the new pixel's opcode.  So a
+// caller must not treat `w.at` standing still as an error, and must
+// call `finish`.
+//
+// Pixels are given in raster order — left to right, top to bottom —
+// because that is the only order QOI has.  There is no way to encode
+// them in another order and no reason to want one.
+//
+// ```novo
+// use qoienc
+// use qoi
+// use srgb
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgba, space: QoiAllLinear }
+//     let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+//     let w2 = qoienc.push(w.enc, srgb.opaque(srgb.white()), w.buf, w.at)
+//     println("${qoienc.total_in(w2.enc)}")                // 1
+// ```
+pub fn push(e: QoiEncoder, px: Srgba8, out: Bytes, at: Int) -> QoiWrite
+    todo("qoi-nv.qoienc.push")
+
+// Hand the encoder a whole row of packed samples.
+//
+// The bulk form, for a caller who has an image as a flat buffer rather
+// than as pixel values — which is every caller that decoded one.
+// `channels` says how the samples are packed, 3 or 4, and need not
+// match the header's: a three-channel row into a four-channel file is
+// widened to opaque, which is what a caller compositing a photograph
+// onto an RGBA canvas wants.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+//     let w2 = qoienc.push_samples(w.enc, bytes.zeros(3), 3, w.buf, w.at)
+//     println("${qoienc.total_in(w2.enc)}")                // 1
+// ```
+pub fn push_samples(e: QoiEncoder, row: Bytes, channels: Int, out: Bytes, at: Int) -> QoiWrite
+    todo("qoi-nv.qoienc.push_samples")
+
+// Close the body: the open run, then the eight-byte end marker.
+//
+// Not optional.  An encoder with a run open has not written it, and a
+// file without the end marker is one every decoder will complain
+// about.
+//
+// `Err` when the pixel count does not match the header's dimensions,
+// which is the one thing an encoder can check that a decoder cannot
+// fix — a caller who pushed the wrong number of pixels has produced a
+// file nothing can read, and hearing about it here is better than
+// shipping it.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+//     match qoienc.finish(w.enc, w.buf, w.at)
+//         Ok(_)  => println("closed")
+//         Err(_) => println("wrong number of pixels")      // this one
+// ```
+pub fn finish(e: QoiEncoder, out: Bytes, at: Int) -> Result<(Bytes, Int), QoiError>
+    todo("qoi-nv.qoienc.finish")
+
+// The sticky failure, if the encoder has one.
+//
+// Only ever `QoiBufferTooSmall` — nothing else can go wrong while
+// encoding, because every pixel has an encoding and there is no
+// choice to get wrong.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     match qoienc.error(qoienc.encoder(h))
+//         Some(_) => println("already bad")
+//         None    => println("clean")                      // this one
+// ```
+pub fn error(e: QoiEncoder) -> ?QoiError
+    todo("qoi-nv.qoienc.error")
+
+// How many pixels have been pushed.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     println("${qoienc.total_in(qoienc.encoder(h))}")     // 0
+// ```
+pub fn total_in(e: QoiEncoder) -> Int
+    todo("qoi-nv.qoienc.total_in")
+
+// How many bytes have been written, header included.
+//
+// The number a caller trims their buffer to after `finish`.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     println("${qoienc.total_out(qoienc.encoder(h))}")    // 0
+// ```
+pub fn total_out(e: QoiEncoder) -> Int
+    todo("qoi-nv.qoienc.total_out")
+
+// Encode a whole image held in memory.
+//
+// The counterpart of `qoidec.decode`, and the call almost every
+// caller wants: a header, a flat buffer of samples in the header's
+// channel count, and a file comes back sized exactly to what was
+// written rather than to `qoi.max_encoded_size`.
+//
+// This one DOES allocate, because a caller who has the whole image in
+// memory has already decided to, and making them size a buffer for the
+// worst case would be five bytes per pixel of politeness nobody
+// wanted.  The buffer-supplied form above is for the caller who is
+// avoiding exactly that.
+//
+// ```novo
+// use qoienc
+// use qoi
+//
+// fn main() [io]
+//     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+//     match qoienc.encode(h, bytes.zeros(3))
+//         Ok(_)  => println("encoded")                     // this one
+//         Err(_) => println("refused")
+// ```
+pub fn encode(h: QoiHeader, samples: Bytes) -> Result<Bytes, QoiError>
+    todo("qoi-nv.qoienc.encode")

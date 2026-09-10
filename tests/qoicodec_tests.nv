@@ -1,0 +1,176 @@
+// qoicodec_tests.nv — the API suite for the decoder and the encoder.
+//
+// RED ON PURPOSE: every body is a `todo()`.  See qoi_tests.nv for why
+// an interface package ships a failing suite.
+//
+// What these assert is the CONTRACT rather than the compression: that
+// a fresh decoder is clean and knows nothing, that an empty chunk is
+// not an end of stream, that a failure is sticky, that `finish` is
+// where truncation and the end marker are checked, and that the
+// encoder holds a run back until something ends it.
+
+use std.test
+use qoi
+use qoidec
+use qoienc
+use qoierror
+use srgb
+
+@test
+fn test_a_fresh_decoder_is_clean_and_knows_nothing() [io]
+    let d = qoidec.decoder()
+
+    test.case("nothing consumed, nothing produced, not done")
+    test.assert(qoidec.total_in(d) == 0)
+    test.assert(qoidec.total_out(d) == 0)
+    test.assert(qoidec.is_done(d) == false)
+
+    test.case("no failure")
+    match qoidec.error(d)
+        Some(_) => test.fail("a fresh decoder is already failed")
+        None    => test.assert(true)
+
+    test.case("and no header until fourteen bytes have arrived")
+    match qoidec.header(d)
+        Some(_) => test.fail("a fresh decoder claims to know the dimensions")
+        None    => test.assert(true)
+
+@test
+fn test_an_empty_chunk_is_not_an_end_of_stream() [io]
+    test.case("it produces nothing and changes nothing")
+    let (d, out) = qoidec.feed(qoidec.decoder(), bytes.zeros(0))
+    test.assert(bytes.len(out) == 0)
+    test.assert(qoidec.total_out(d) == 0)
+    test.assert(qoidec.is_done(d) == false)
+
+@test
+fn test_finishing_a_stream_that_never_started_is_an_error() [io]
+    test.case("no header, so nothing about the file is known")
+    match qoidec.finish(qoidec.decoder())
+        Ok(_)  => test.fail("an empty stream was accepted as a whole file")
+        Err(e) => test.assert(qoierror.offset_of(e) == 0)
+
+@test
+fn test_the_output_channel_count_can_be_overridden() [io]
+    test.case("a caller filling an RGBA texture from a three-channel file")
+    let d = qoidec.with_channels(qoidec.decoder(), 4)
+    test.assert(qoidec.total_out(d) == 0)
+
+@test
+fn test_decoding_something_that_is_not_a_qoi_file_names_the_magic() [io]
+    test.case("the first four bytes, carried so a caller can recognise them")
+    match qoidec.decode(bytes.zeros(32))
+        Ok(_)                    => test.fail("32 zero bytes decoded as an image")
+        Err(QoiBadMagic(off, _)) => test.assert(off == 0)
+        Err(_)                   => test.fail("refused for the wrong reason")
+
+@test
+fn test_a_header_shorter_than_fourteen_bytes_is_its_own_error() [io]
+    test.case("distinct from a bad magic — the file may be fine and cut short")
+    match qoidec.read_header(bytes.zeros(4))
+        Ok(_)                           => test.fail("a four-byte header was read")
+        Err(QoiTruncatedHeader(_, len)) => test.assert(len == 4)
+        Err(_)                          => test.fail("refused for the wrong reason")
+
+@test
+fn test_read_header_touches_only_the_first_fourteen_bytes() [io]
+    test.case("so a caller can decide before committing memory")
+    match qoidec.read_header(bytes.zeros(14))
+        Ok(_)  => test.fail("fourteen zero bytes are not a header")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_fresh_encoder_has_written_nothing() [io]
+    let h = QoiHeader { width: 2, height: 2, channels: QoiRgba, space: QoiSrgbLinearAlpha }
+    let e = qoienc.encoder(h)
+
+    test.case("no pixels in, no bytes out")
+    test.assert(qoienc.total_in(e) == 0)
+    test.assert(qoienc.total_out(e) == 0)
+
+    test.case("and no failure")
+    match qoienc.error(e)
+        Some(_) => test.fail("a fresh encoder is already failed")
+        None    => test.assert(true)
+
+@test
+fn test_start_writes_the_header_and_nothing_else() [io]
+    test.case("fourteen bytes, and the offset moves by fourteen")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+    test.assert(w.at == 14)
+    test.assert(qoienc.total_out(w.enc) == 14)
+    test.assert(qoienc.total_in(w.enc) == 0)
+
+@test
+fn test_push_takes_a_pixel_and_usually_writes_nothing() [io]
+    test.case("the first pixel opens a run rather than emitting bytes")
+    let h = QoiHeader { width: 2, height: 1, channels: QoiRgba, space: QoiAllLinear }
+    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+    let w2 = qoienc.push(w.enc, srgb.opaque(srgb.black()), w.buf, w.at)
+
+    test.case("so the pixel count moved and the offset did not")
+    test.assert(qoienc.total_in(w2.enc) == 1)
+    test.assert(w2.at == 14)
+
+@test
+fn test_pushing_samples_counts_pixels_and_not_bytes() [io]
+    test.case("three bytes at three channels is one pixel")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+    let w2 = qoienc.push_samples(w.enc, bytes.zeros(3), 3, w.buf, w.at)
+    test.assert(qoienc.total_in(w2.enc) == 1)
+
+@test
+fn test_finishing_with_the_wrong_pixel_count_is_refused() [io]
+    test.case("a file nothing could read is better caught here")
+    let h = QoiHeader { width: 4, height: 4, channels: QoiRgb, space: QoiAllLinear }
+    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(qoi.max_encoded_size(h)), 0)
+    match qoienc.finish(w.enc, w.buf, w.at)
+        Ok(_)  => test.fail("zero pixels accepted for a 16-pixel image")
+        Err(e) => test.assert(qoierror.image_is_complete(e) == false)
+
+@test
+fn test_a_buffer_sized_by_max_encoded_size_cannot_overflow() [io]
+    test.case("one pixel into a buffer sized for one pixel")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgba, space: QoiAllLinear }
+    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(qoi.max_encoded_size(h)), 0)
+    let w2 = qoienc.push(w.enc, srgb.opaque(srgb.white()), w.buf, w.at)
+    match qoienc.error(w2.enc)
+        Some(_) => test.fail("a correctly sized buffer overflowed")
+        None    => test.assert(true)
+
+@test
+fn test_the_whole_buffer_encoder_sizes_its_own_output() [io]
+    test.case("the caller who has the whole image does not size a buffer")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    match qoienc.encode(h, bytes.zeros(3))
+        Ok(out) => test.assert(bytes.len(out) < qoi.max_encoded_size(h))
+        Err(_)  => test.fail("one black pixel could not be encoded")
+
+@test
+fn test_encoding_the_wrong_number_of_samples_is_refused() [io]
+    test.case("two pixels of samples for a one-pixel image")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    match qoienc.encode(h, bytes.zeros(6))
+        Ok(_)  => test.fail("six samples accepted for a one-pixel three-channel image")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_complete_image_in_an_incomplete_file_says_so() [io]
+    test.case("the pixels are usable and the framing is not")
+    test.assert(qoierror.image_is_complete(QoiMissingEndMarker(64)))
+    test.assert(qoierror.image_is_complete(QoiTrailingBytes(64, 3)))
+
+    test.case("and a truncation is not recoverable that way")
+    test.assert(qoierror.image_is_complete(QoiTruncatedStream(64, 100, 40)) == false)
+
+@test
+fn test_every_error_carries_the_offset_it_happened_at() [io]
+    test.case("there is no QOI error that is not about a place in the file")
+    test.assert(qoierror.offset_of(QoiBadChannels(12, 5)) == 12)
+    test.assert(qoierror.offset_of(QoiBadColorspace(13, 9)) == 13)
+    test.assert(qoierror.offset_of(QoiZeroDimension(4, 0, 10)) == 4)
+    test.assert(qoierror.offset_of(QoiTooManyPixels(4, 65536, 65536)) == 4)
+    test.assert(qoierror.offset_of(QoiOutputTooLarge(99, 16)) == 99)
+    test.assert(qoierror.offset_of(QoiBufferTooSmall(20, 27, 16)) == 20)

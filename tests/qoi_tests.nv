@@ -1,0 +1,95 @@
+// qoi_tests.nv — the API suite for the header and the size
+// arithmetic.
+//
+// RED ON PURPOSE.  Every body in this package is a `todo()`, so every
+// assertion below reaches `not implemented: qoi-nv.<module>.<fn>` and
+// the suite fails.  That is the expected state of an interface package
+// and it is what makes these tests worth writing NOW: they compile
+// against the signatures, which is the claim being reviewed, and the
+// day a body lands the suite says whether the body agrees with what
+// was promised.
+//
+// Unusually for this grid, these assertions are BINDING rather than
+// illustrative: QOI's specification fixes every number in them, so a
+// body that disagrees with one of these is wrong rather than
+// different.
+
+use std.test
+use qoi
+
+@test
+fn test_the_header_is_fourteen_bytes_and_the_marker_is_eight() [io]
+    test.case("the two fixed sizes of the format")
+    test.assert(qoi.header_size() == 14)
+    test.assert(bytes.len(qoi.magic()) == 4)
+    test.assert(bytes.len(qoi.end_marker()) == 8)
+
+@test
+fn test_the_magic_is_the_four_ascii_bytes_qoif() [io]
+    test.case("q o i f")
+    let m = qoi.magic()
+    test.assert(bytes.byte_at(m, 0) == Some('q'))
+    test.assert(bytes.byte_at(m, 3) == Some('f'))
+
+@test
+fn test_the_end_marker_is_seven_zeroes_and_a_one() [io]
+    test.case("not padding — the format's only framing check")
+    let e = qoi.end_marker()
+    test.assert(bytes.byte_at(e, 0) == Some(0))
+    test.assert(bytes.byte_at(e, 6) == Some(0))
+    test.assert(bytes.byte_at(e, 7) == Some(1))
+
+@test
+fn test_is_qoi_reads_four_bytes_and_says_nothing_more() [io]
+    test.case("the magic, and only the magic")
+    test.assert(qoi.is_qoi(qoi.magic()))
+
+    test.case("a shorter buffer is not a QOI file and does not panic")
+    test.assert(qoi.is_qoi(bytes.zeros(3)) == false)
+
+    test.case("nor is a PNG signature")
+    test.assert(qoi.is_qoi(bytes.zeros(8)) == false)
+
+@test
+fn test_the_two_enumerations_are_the_bytes_the_file_carries() [io]
+    test.case("channels are 3 or 4")
+    test.assert(qoi.channel_count(QoiRgb) == 3)
+    test.assert(qoi.channel_count(QoiRgba) == 4)
+
+    test.case("the colorspace byte is 0 or 1, and changes nothing")
+    test.assert(qoi.space_byte(QoiSrgbLinearAlpha) == 0)
+    test.assert(qoi.space_byte(QoiAllLinear) == 1)
+
+@test
+fn test_the_size_arithmetic_is_the_specifications() [io]
+    let h = QoiHeader { width: 2, height: 3, channels: QoiRgba, space: QoiSrgbLinearAlpha }
+
+    test.case("pixels are width times height")
+    test.assert(qoi.pixel_count(h) == 6)
+
+    test.case("decoded bytes are that times the channel count")
+    test.assert(qoi.decoded_size(h) == 24)
+
+    test.case("and the worst case is five bytes a pixel plus twenty-two")
+    test.assert(qoi.max_encoded_size(h) == 52)
+
+@test
+fn test_a_three_channel_worst_case_is_four_bytes_a_pixel() [io]
+    test.case("QoiOpRgb is one tag and three literals")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    test.assert(qoi.max_encoded_size(h) == 26)
+
+@test
+fn test_writing_a_header_advances_the_offset_by_fourteen() [io]
+    test.case("and hands the buffer back, because Bytes is a value")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    let (buf, at) = qoi.write_header(h, bytes.zeros(32), 0)
+    test.assert(at == 14)
+    test.assert(bytes.len(buf) == 32)
+
+    test.case("the magic goes first")
+    test.assert(bytes.byte_at(buf, 0) == Some('q'))
+
+    test.case("and the dimensions are BIG-endian, which is the trap")
+    test.assert(bytes.byte_at(buf, 4) == Some(0))
+    test.assert(bytes.byte_at(buf, 7) == Some(1))
