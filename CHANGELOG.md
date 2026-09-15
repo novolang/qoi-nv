@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.2 — 2026-09-15
+
+- README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
+
 ## 0.0.1
 
 - The interface, covering the whole format: the fourteen-byte header,

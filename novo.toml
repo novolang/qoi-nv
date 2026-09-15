@@ -1,6 +1,6 @@
 [package]
 name        = "qoi-nv"
-version     = "0.0.1"
+version     = "0.0.2"
 description = "The Quite OK Image format, whole: the fourteen-byte header, all six opcodes and the sixty-four-entry running array, decoded by a feed-and-drain state machine the host pumps or in one call over a buffer, and encoded into a buffer the caller supplies at a size this package can tell them exactly."
 license     = "Apache-2.0"
 
