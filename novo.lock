@@ -3,6 +3,6 @@
 [color-nv]
 source = "registry"
 url = "https://registry.novo-lang.org"
-req = "^0.0.1"
-version = "0.0.1"
-hash = "4ce79b7326161164055faeb5c8abec5e1fccb898409318b66c753e3f312e3f8b"
+req = "^0.1.1"
+version = "0.1.1"
+hash = "6e4ebf531e3f2e4e11cfe9ad8b6b087792bac7bfd4cd0d901ae7e148c30e15ae"

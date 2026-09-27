@@ -1,13 +1,8 @@
-// qoiop_tests.nv — the API suite for the six opcodes and the running
-// array.
+// qoiop_tests.nv — the six opcodes and the running array.
 //
-// RED ON PURPOSE: every body is a `todo()`.  See qoi_tests.nv for why
-// an interface package ships a failing suite.
-//
-// Every number here is the specification's, so these are the most
-// binding assertions in the package: the opcode sizes, the hash's
-// multipliers, the two disagreeing initial states, and the fact that
-// a run of 63 does not exist.
+// Every number here is the specification's: the opcode sizes, the
+// hash's multipliers, the two initial states, and the run that stops at
+// 62.
 
 use std.test
 use qoiop

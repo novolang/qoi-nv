@@ -1,0 +1,237 @@
+// stream_tests.nv — the decoder fed in pieces, every refusal of the
+// decoder and the encoder with its offset, and the opcode reader on
+// every opcode.
+//
+// A file is decoded whole and in chunks of every size from one byte
+// up, and each way must give the same pixels.  Each broken file is
+// built from a good one by changing the one thing the case is about.
+
+use std.test
+use std.list
+use srgb
+use qoi
+use qoiop
+use qoidec
+use qoienc
+use qoierror
+
+// A 5 by 3 four-channel image whose encoding holds every opcode: a
+// literal with alpha, a literal, a diff, a luma, an index and a run.
+fn sample_pixels() -> Bytes
+    let px = [10, 20, 30, 40, 10, 20, 30, 40, 11, 19, 30, 40, 30, 39, 50, 40,
+              200, 100, 50, 40, 10, 20, 30, 40, 10, 20, 30, 40, 10, 20, 30, 40,
+              0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255,
+              1, 1, 1, 255, 1, 1, 1, 255, 1, 1, 1, 255]
+    bytes.from_byte_list(px)
+
+fn sample_head() -> QoiHeader
+    QoiHeader { width: 5, height: 3, channels: QoiRgba, space: QoiSrgbLinearAlpha }
+
+fn sample_file() -> Bytes
+    match qoienc.encode(sample_head(), sample_pixels())
+        Ok(f)  => f
+        Err(_) => bytes.zeros(0)
+
+// The pixels of `file` fed `step` bytes at a time, and whether the
+// stream finished whole.
+fn chunked(file: Bytes, step: Int) -> (Bytes, Bool)
+    var d = qoidec.decoder()
+    var pixels = bytes.zeros(0)
+    var at = 0
+    while at < bytes.len(file)
+        let end = math.min(at + step, bytes.len(file))
+        let (next, out) = qoidec.feed(d, bytes.slice(file, at, end))
+        pixels = bytes.concat([pixels, out])
+        d = next
+        at = end
+    (pixels, qoidec.finish(d) == Ok())
+
+// The error `decode` refuses a file with, as its message.
+fn refusal(file: Bytes) -> Str
+    match qoidec.decode(file)
+        Ok(_)  => "accepted"
+        Err(e) => e.message()
+
+fn with_byte(file: Bytes, at: Int, v: Int) -> Bytes
+    var copy = bytes.clone(file)
+    bytes.set_u8(copy, at, v)
+    copy
+
+@test
+fn test_every_chunking_gives_the_same_pixels() [io]
+    let file = sample_file()
+    test.case("the sample holds every opcode")
+    test.assert(bytes.len(file) < qoi.max_encoded_size(sample_head()))
+    for step in [1, 2, 3, 5, 7, 13, 14, 15, 64]
+        test.case("${step} bytes at a time")
+        let (px, whole) = chunked(file, step)
+        test.assert(px == sample_pixels() and whole)
+
+    test.case("the header is known once fourteen bytes have arrived, and not before")
+    let (d13, _) = qoidec.feed(qoidec.decoder(), bytes.slice(file, 0, 13))
+    test.assert(qoidec.header(d13) == None and qoidec.total_in(d13) == 13)
+    test.assert(qoidec.is_done(d13) == false)
+    let (d14, _) = qoidec.feed(d13, bytes.slice(file, 13, 14))
+    match qoidec.header(d14)
+        Some(h) => test.assert(h.width == 5 and h.height == 3)
+        None    => test.assert(false)
+
+    test.case("the pixels are all there before the end marker is")
+    let (d, _) = qoidec.feed(qoidec.decoder(), bytes.slice(file, 0, bytes.len(file) - 8))
+    test.assert(qoidec.is_done(d) and qoidec.total_out(d) == 15)
+    test.assert(qoidec.finish(d) == Err(QoiMissingEndMarker(bytes.len(file) - 8)))
+
+@test
+fn test_the_output_channels_can_be_narrowed_and_widened() [io]
+    test.case("a four-channel file drained as three drops alpha")
+    let d3 = qoidec.with_channels(qoidec.decoder(), 3)
+    let (_, three) = qoidec.feed(d3, sample_file())
+    test.assert(bytes.len(three) == 45 and bytes.byte_at(three, 3) == Some(10))
+    test.case("a three-channel file drained as four is opaque")
+    let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    match qoienc.encode(h, bytes.from_byte_list([9, 8, 7]))
+        Ok(f)  =>
+            let (_, four) = qoidec.feed(qoidec.with_channels(qoidec.decoder(), 4), f)
+            test.assert(four == bytes.from_byte_list([9, 8, 7, 255]))
+        Err(_) => test.assert(false)
+    test.case("and any other count is a program error")
+    test.assert_raises(() => qoidec.with_channels(qoidec.decoder(), 2))
+
+@test
+fn test_a_header_is_refused_field_by_field() [io]
+    let file = sample_file()
+    test.case("the magic, the channels byte and the colour space byte")
+    test.assert(refusal(with_byte(file, 0, 'x')) == "the file starts with 2020567398 rather than the magic qoif, at byte 0")
+    test.assert(refusal(with_byte(file, 12, 5)) == "the channels byte is 5 rather than 3 or 4, at byte 12")
+    test.assert(refusal(with_byte(file, 13, 2)) == "the colour space byte is 2 rather than 0 or 1, at byte 13")
+    test.case("an image with no pixels, and one with more than the reference allows")
+    test.assert(refusal(with_byte(file, 7, 0)) == "the image is 0 by 3 pixels, which holds none, at byte 4")
+    var big = bytes.clone(file)
+    bytes.set_u32_be(big, 4, 20000)
+    bytes.set_u32_be(big, 8, 20000)
+    test.assert(refusal(big) == "the image is 20000 by 20000 pixels, more than 400000000, at byte 4")
+    test.case("and a header cut short")
+    test.assert(refusal(bytes.slice(file, 0, 9)) == "the header is 9 bytes rather than 14, at byte 9")
+    match qoidec.read_header(file)
+        Ok(h)  => test.assert(qoi.pixel_count(h) == 15)
+        Err(_) => test.assert(false)
+
+@test
+fn test_a_body_is_refused_where_it_goes_wrong() [io]
+    let file = sample_file()
+    let n = bytes.len(file)
+    test.case("a stream that stops before its pixels")
+    test.assert(refusal(bytes.slice(file, 0, 20)) == "the stream ends after 2 of 15 pixels, at byte 20")
+    test.case("an end marker that is not seven zeroes and a one")
+    test.assert(refusal(with_byte(file, n - 1, 2)) == "the end marker is missing at byte ${n - 8}")
+    test.case("bytes after the end marker")
+    test.assert(refusal(bytes.concat([file, bytes.zeros(3)])) == "3 bytes follow the end marker, at byte ${n}")
+    test.case("a run that codes more pixels than the image has")
+    let h = QoiHeader { width: 2, height: 1, channels: QoiRgba, space: QoiAllLinear }
+    var runaway = bytes.zeros(14 + 1 + 8)
+    qoi.write_header(h, runaway, 0)
+    bytes.set_u8(runaway, 14, 192 + 4)
+    bytes.set_u8(runaway, 22, 1)
+    test.assert(refusal(runaway) == "the stream codes more than its 2 pixels, at byte 14")
+    test.case("a failed decoder takes no more bytes")
+    let (d, _) = qoidec.feed(qoidec.decoder(), with_byte(file, 12, 9))
+    let (d2, out) = qoidec.feed(d, file)
+    test.assert(bytes.len(out) == 0 and qoidec.total_in(d2) == qoidec.total_in(d))
+    test.assert(qoidec.error(d2) == Some(QoiBadChannels(12, 9)))
+
+@test
+fn test_the_encoder_refuses_a_buffer_too_small_and_extra_pixels() [io]
+    let h = QoiHeader { width: 2, height: 1, channels: QoiRgba, space: QoiAllLinear }
+    let red = srgb.opaque(srgb.rgb8(100, 50, 0))
+    test.case("no room for the header")
+    var tiny = bytes.zeros(10)
+    let w0 = qoienc.start(qoienc.encoder(h), tiny, 0)
+    test.assert(qoienc.error(w0.enc) == Some(QoiBufferTooSmall(0, 36, 10)))
+    test.assert(qoienc.finish(w0.enc, tiny, w0.at) == Err(QoiBufferTooSmall(0, 36, 10)))
+    test.case("no room for an opcode, and the failure is kept")
+    var small = bytes.zeros(16)
+    var w = qoienc.start(qoienc.encoder(h), small, 0)
+    w = qoienc.push(w.enc, red, small, w.at)
+    test.assert(qoienc.error(w.enc) == Some(QoiBufferTooSmall(14, 36, 16)))
+    let w2 = qoienc.push(w.enc, red, small, w.at)
+    test.assert(qoienc.total_in(w2.enc) == qoienc.total_in(w.enc))
+    test.case("no room for the end marker")
+    var nine = bytes.zeros(20)
+    var v = qoienc.start(qoienc.encoder(h), nine, 0)
+    v = qoienc.push_samples(v.enc, bytes.zeros(8), 4, nine, v.at)
+    test.assert(qoienc.finish(v.enc, nine, v.at) == Err(QoiBufferTooSmall(17, 36, 20)))
+    test.case("a pixel past the header's count")
+    var room = bytes.zeros(64)
+    var x = qoienc.start(qoienc.encoder(h), room, 0)
+    x = qoienc.push_samples(x.enc, bytes.zeros(12), 4, room, x.at)
+    test.assert(qoienc.error(x.enc) == Some(QoiOutputTooLarge(19, 2)))
+    test.case("samples packed in a count that is neither 3 nor 4 fail the encoder")
+    let y = qoienc.push_samples(qoienc.encoder(h), bytes.zeros(2), 2, bytes.zeros(64), 14)
+    test.assert(qoienc.error(y.enc) == Some(QoiBadChannels(14, 2)) and qoienc.total_in(y.enc) == 0)
+
+@test
+fn test_the_last_pixel_closes_an_open_run() [io]
+    test.case("pixels equal to the one before stay open until the image ends")
+    let h = QoiHeader { width: 3, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    var buf = bytes.zeros(qoi.max_encoded_size(h))
+    let black = srgb.opaque(srgb.black())
+    var w = qoienc.start(qoienc.encoder(h), buf, 0)
+    w = qoienc.push(w.enc, black, buf, w.at)
+    w = qoienc.push(w.enc, black, buf, w.at)
+    test.assert(w.at == 14)
+    test.assert(qoienc.finish(w.enc, buf, w.at) == Err(QoiTruncatedStream(14, 3, 2)))
+    w = qoienc.push(w.enc, black, buf, w.at)
+    test.assert(w.at == 15 and bytes.byte_at(buf, 14) == Some(194))
+    match qoienc.finish(w.enc, buf, w.at)
+        Ok((_, end)) => test.assert(end == 23 and qoienc.total_out(w.enc) == 15)
+        Err(_)       => test.assert(false)
+    test.case("a three-channel image is opaque whatever alpha a pixel brings")
+    var two = bytes.zeros(64)
+    let h2 = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    var y = qoienc.start(qoienc.encoder(h2), two, 0)
+    y = qoienc.push(y.enc, srgb.with_alpha(srgb.rgb8(100, 9, 200), 3), two, y.at)
+    test.assert(y.at == 18 and bytes.byte_at(two, 14) == Some(254))
+    test.case("and encode refuses too few samples, or an image with no pixels")
+    test.assert(qoienc.encode(h, bytes.zeros(5)) == Err(QoiTruncatedStream(5, 3, 1)))
+    let empty = QoiHeader { width: 0, height: 1, channels: QoiRgb, space: QoiAllLinear }
+    test.assert(qoienc.encode(empty, bytes.zeros(0)) == Err(QoiZeroDimension(4, 0, 1)))
+
+@test
+fn test_every_opcode_reads_back_and_applies() [io]
+    let prev = srgb.opaque(srgb.rgb8(100, 100, 100))
+    let t = qoiop.running_new()
+    let ops = [QoiOpIndex(5), QoiOpDiff(0 - 2, 1, 0), QoiOpLuma(0 - 5, 3, 10), QoiOpRun(62),
+               QoiOpRgb(1, 2, 3), QoiOpRgba(4, 5, 6, 7)]
+    for op in ops
+        test.case("${qoiop.op_name(op)} survives a write and a read")
+        var buf = bytes.zeros(8)
+        let (_, end) = qoiop.write_op(op, buf, 1)
+        test.assert(end == 1 + qoiop.op_size(op))
+        match qoiop.read_op(buf, 1)
+            Some(back) => test.assert(qoiop.op_name(back) == qoiop.op_name(op)
+                                      and srgb.same_pixel(qoiop.apply(back, prev, t),
+                                                          qoiop.apply(op, prev, t)))
+            None       => test.assert(false)
+    test.case("a diff and a luma wrap at 256")
+    let top = srgb.opaque(srgb.rgb8(255, 0, 255))
+    let d = qoiop.apply(QoiOpDiff(1, 0 - 1, 1), top, t)
+    test.assert(d.rgb.r == 0 and d.rgb.g == 255 and d.rgb.b == 0)
+    let l = qoiop.apply(QoiOpLuma(0 - 30, 0 - 32, 0 - 25), srgb.opaque(srgb.black()), t)
+    test.assert(l.rgb.r == 226 and l.rgb.g == 224 and l.rgb.b == 231)
+    test.case("an opcode cut short reads as nothing, and one that does not fit is a program error")
+    test.assert(qoiop.read_op(bytes.from_byte_list([254, 1, 2]), 0) == None)
+    test.assert_raises(() => qoiop.write_op(QoiOpRgba(1, 1, 1, 1), bytes.zeros(4), 0))
+
+@test
+fn test_every_error_has_a_message() [io]
+    let errors = [QoiBadMagic(1, 7), QoiBadChannels(2, 5), QoiBadColorspace(3, 9),
+                  QoiZeroDimension(4, 0, 1), QoiTooManyPixels(5, 1, 1),
+                  QoiTruncatedHeader(6, 6), QoiTruncatedStream(7, 2, 1),
+                  QoiMissingEndMarker(8), QoiTrailingBytes(9, 1), QoiOutputTooLarge(10, 3),
+                  QoiBufferTooSmall(11, 30, 20)]
+    var expected = 1
+    for e in errors
+        test.case("variant ${expected}")
+        test.assert(qoierror.offset_of(e) == expected)
+        test.assert(str.ends_with(e.message(), "at byte ${expected}"))
+        expected = expected + 1

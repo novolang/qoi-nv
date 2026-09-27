@@ -1,0 +1,61 @@
+// corpus_tests.nv — the small images of the official QOI test set.
+//
+// Written by `python3 tools/qoiref.py corpus <dir>`, where <dir> holds
+// the unpacked https://qoiformat.org/qoi_test_images.zip.  The tool
+// checks each file against its PNG twin with a PNG reader of its own
+// and a Python QOI codec, then records here what the pixels and the
+// file hash to.  Each case decodes the file and compares the pixels'
+// CRC-32 with the PNG's.  Each file an encoder could have written is
+// encoded back from those pixels byte for byte; edgecase.qoi uses
+// opcodes an encoder would not choose, and is encoded and decoded back
+// to the same pixels instead.
+
+use std.test
+use std.fs
+use std.codec
+use qoi
+use qoidec
+use qoienc
+
+fn read(name: Str) -> Bytes [fs]
+    fs.read_bytes("tests/images/" + name + ".qoi") ?? bytes.zeros(0)
+
+// Whether a file decodes to pixels with the recorded CRC-32 in four
+// channels and in its own, and encodes back to itself.
+fn agrees(name: Str, w: Int, h: Int, ch: Int, space: Int, rgba_crc: Int, native_crc: Int, size: Int,
+          file_crc: Int, canonical: Bool) -> Bool [fs]
+    let file = read(name)
+    if bytes.len(file) != size or codec.crc32(file) != file_crc
+        return false
+    let (d, rgba) = qoidec.feed(qoidec.with_channels(qoidec.decoder(), 4), file)
+    let whole = qoidec.finish(d)
+    match qoidec.decode(file)
+        Ok((head, pixels)) =>
+            let shape = head.width == w and head.height == h
+                and qoi.channel_count(head.channels) == ch and qoi.space_byte(head.space) == space
+            shape and whole == Ok() and codec.crc32(rgba) == rgba_crc
+                and codec.crc32(pixels) == native_crc and encodes_back(head, pixels, file, canonical)
+        Err(_)             => false
+
+// Whether the pixels encode to the file itself, or, for a file an
+// encoder would not have written, to a file that decodes to them.
+fn encodes_back(head: QoiHeader, pixels: Bytes, file: Bytes, canonical: Bool) -> Bool
+    match qoienc.encode(head, pixels)
+        Ok(again) =>
+            if canonical
+                return again == file
+            match qoidec.decode(again)
+                Ok((_, back)) => back == pixels
+                Err(_)        => false
+        Err(_)    => false
+
+@test
+fn test_the_official_images_decode_and_encode_byte_for_byte() [io, fs]
+    test.case("edgecase, 256 by 64, 4 channels")
+    test.assert(agrees("edgecase", 256, 64, 4, 0, 2041541341, 2041541341, 2114, 3072981673, false))
+    test.case("qoi_logo, 448 by 220, 4 channels")
+    test.assert(agrees("qoi_logo", 448, 220, 4, 0, 3130148596, 3130148596, 16488, 2325137193, true))
+    test.case("testcard, 256 by 256, 4 channels")
+    test.assert(agrees("testcard", 256, 256, 4, 0, 1285404031, 1285404031, 21857, 1080517066, true))
+    test.case("testcard_rgba, 256 by 256, 4 channels")
+    test.assert(agrees("testcard_rgba", 256, 256, 4, 0, 1682252885, 1682252885, 24167, 3832443058, true))

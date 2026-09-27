@@ -1,74 +1,36 @@
-// qoidec.nv — the decoder, in the two shapes a caller needs: a
-// feed-and-drain state machine the host pumps, and a whole-buffer call
-// for the common case.
+// qoidec.nv — the decoder: a feed-and-drain state machine the caller
+// pumps, and one call over a whole buffer.
 //
-// THE SHAPE, AND WHY IT IS THIS ONE
-//
-// `qoi-nv` is a `core` package, so its budget is no effects at all and
-// it may not read a file, a socket or standard input.  A QOI file is
-// exactly the thing a caller has in a file.  Those two facts are
-// reconciled by a FEED-AND-DRAIN STATE MACHINE: the host holds the
-// stream, hands this package whatever bytes it has, and gets back the
-// pixels those bytes produced plus a decoder to hand the next chunk
-// to.
+// This package reads nothing itself.  The caller holds the stream,
+// hands `feed` whatever bytes have arrived, and gets back the pixels
+// those bytes produced and a decoder to hand the next chunk to:
 //
 //     var d = qoidec.decoder()
-//     let (d2, out) = qoidec.feed(d, chunk)      // as many times as you like
-//     qoidec.finish(d2)!                         // once, at end of stream
+//     let (d2, out) = qoidec.feed(d, chunk)      // as many times as needed
+//     qoidec.finish(d2)!                         // once, at the end
 //
-// A chunk may split ANYTHING — the header between its width and its
-// height, a `QoiOpLuma` between its two bytes, the end marker — and
-// the decoder carries whatever it could not finish into the next call.
-// `feed` returns a NEW decoder rather than mutating one, because
-// `[mutate]` is a host effect and this package has none.
+// A chunk may split anything: the header between its width and its
+// height, a two-byte `QoiOpLuma`, the end marker.  The decoder carries
+// what it could not finish into the next call.  `feed` answers a new
+// decoder and leaves the one it was given as it was, so a decoder can
+// be kept or fed from two places.
 //
-// FEED-AND-DRAIN OVER PIXELS, NOT OVER EVENTS
+// `feed` does not answer a `Result`.  A corrupt file at pixel 40,000
+// does not throw away the pixels before it; the failure is kept, `error`
+// answers it, and every later `feed` produces nothing.
 //
-// png-nv's decoder drains EVENTS, because a PNG carries chunks a
-// reader has to be told about and rows that arrive out of order under
-// interlacing.  A QOI file has none of that: it is a header and then a
-// flat sequence of pixels in raster order, so the drained value is
-// just the pixels, and there is nothing an event could carry that
-// `header` does not already answer.  That is the difference between
-// the second and the first of `docs/publishing.md`'s four shapes, and
-// it is the format that decides which — not a preference.
-//
-// WHY THERE IS NO `read_all`
-//
-// flate-nv and png-nv both offer an effect-polymorphic
-// `read_all<S: Read[e]>` that writes the pump once inside the package.
-// This one does not, and the reason is that it would be a convenience
-// that defeats its own purpose: a QOI file expands to
-// `w * h * channels` bytes with no compression state, so a caller who
-// cannot hold the whole INPUT certainly cannot hold the whole OUTPUT,
-// and `read_all` would build exactly that.  The caller who wants a
-// whole image in memory calls `decode`, which is honest about needing
-// the whole file too; the caller who cannot hold one uses `feed` and
-// writes their pixels somewhere as they arrive.  For png-nv the
-// arithmetic is different — a compressed file can be a hundredth of
-// its image — and that package has the function.
-//
-// WHAT `feed` DOES NOT DO
-//
-// It does not return a `Result`.  A corrupt file at pixel 40,000 does
-// not throw away the 39,999 before it, and a signature that made the
-// failure the return value would have had to choose between the pixels
-// and the reason.  The failure is sticky — `error` is what asks — and
-// once set every subsequent `feed` produces nothing.
+// No function here has an effect.
 
 use qoi
 use qoiop
+use qoierror
+use srgb
 
 // A decoder between chunks.
 //
-// Opaque in practice — the fields are here so the state is reviewable
-// rather than because a caller should read them — and carried by
-// value: `feed` returns the next one and the previous one is finished
-// with.
-//
-// The largest thing in it is the sixty-four-entry running table, which
-// is why a QOI decoder is affordable in a way almost nothing else on
-// this grid is: no window, no Huffman tables, no row history.
+// The fields show the state; a caller reads it through the functions
+// below.  The largest thing in it is the sixty-four-entry table, and the
+// bytes of an opcode or an end marker that a chunk cut short.
 //
 // ```novo
 // use qoidec
@@ -79,9 +41,8 @@ use qoiop
 pub struct QoiDecoder
     // The header, once the first fourteen bytes have arrived.
     head: ?QoiHeader
-    // The previous pixel, which every opcode is relative to.  Seeded
-    // to OPAQUE BLACK, which is not what the running table is seeded
-    // to — see `qoiop.nv`.
+    // The previous pixel, which every opcode is relative to.  It
+    // starts as opaque black, the table as transparent black.
     prev: Srgba8
     // The sixty-four-entry table of recently seen pixels.
     seen: QoiRunning
@@ -93,11 +54,11 @@ pub struct QoiDecoder
     // How many more copies of `prev` an in-progress run still owes.  A
     // run can be split by a chunk boundary like anything else.
     run_left: Int
-    // Bytes of a partial opcode or a partial header carried over from
-    // the last chunk.
+    // Bytes carried over from the last chunk: a partial header, a
+    // partial opcode, or the end marker so far.
     pending: Bytes
-    // How many channels the drained pixels carry: the header's, unless
-    // `with_channels` overrode it.
+    // How many channels the drained pixels carry: 3 or 4 when
+    // `with_channels` set it, and 0 for the header's.
     out_channels: Int
     // The sticky failure, or absent.
     failure: ?QoiError
@@ -116,20 +77,18 @@ pub struct QoiDecoder
 //         None    => println("not yet")                    // this one
 // ```
 pub fn decoder() -> QoiDecoder
-    todo("qoi-nv.qoidec.decoder")
+    QoiDecoder { head: None, prev: srgb.opaque(srgb.black()), seen: qoiop.running_new(),
+                 consumed: 0, produced: 0, run_left: 0, pending: bytes.zeros(0), out_channels: 0,
+                 failure: None }
 
 // Drain pixels in a fixed number of channels rather than the header's.
 //
-// A caller filling an RGBA texture from a three-channel file would
-// otherwise have to widen every pixel themselves; this is where they
-// say so once.  `n` is 3 or 4 and anything else panics — it is a
-// caller's argument rather than a file's byte, so it is a program
-// error and not a `QoiError`.
+// For a caller filling an RGBA texture from a three-channel file.  `n`
+// is 3 or 4, and anything else panics, since it is the caller's
+// argument and not a file's byte.
 //
-// Widening fills alpha with 255.  Narrowing a four-channel file to
-// three DISCARDS alpha rather than compositing it onto anything, which
-// is the only thing a decoder can honestly do with no background
-// colour to composite against.
+// Widening fills alpha with 255.  Narrowing a four-channel file to three
+// drops alpha rather than compositing it onto anything.
 //
 // ```novo
 // use qoidec
@@ -139,18 +98,22 @@ pub fn decoder() -> QoiDecoder
 //     println("${qoidec.total_out(d)}")                    // 0
 // ```
 pub fn with_channels(d: QoiDecoder, n: Int) -> QoiDecoder
-    todo("qoi-nv.qoidec.with_channels")
+    if n != 3 and n != 4
+        core.panic.panic("qoi-nv.qoidec.with_channels: ${n} channels, where 3 or 4 are the choices")
+    QoiDecoder { head: d.head, prev: d.prev, seen: d.seen, consumed: d.consumed,
+                 produced: d.produced, run_left: d.run_left, pending: d.pending, out_channels: n,
+                 failure: d.failure }
 
 // Hand the decoder a chunk and take the pixels it produced.
 //
-// The load-bearing call.  The returned `Bytes` is whatever finished
-// inside this chunk, in raster order, at the decoder's channel count —
-// possibly empty, which is not an end of stream but a chunk that only
-// advanced the state.  The returned decoder is the one to feed next.
+// The pixels are those finished inside this chunk, in raster order, at
+// the decoder's channel count.  They may be none, which is not an end of
+// stream.  The answered decoder is the one to feed next.
 //
-// An empty chunk is legal and produces nothing.  A chunk fed to a
-// decoder that has already failed produces nothing and leaves the
-// failure alone.
+// An empty chunk produces nothing.  A chunk fed to a decoder that has
+// failed produces nothing and leaves the failure alone.  Once the
+// header's pixel count is reached the bytes that follow are the end
+// marker, and a wrong marker or bytes after it fail the decoder here.
 //
 // ```novo
 // use qoidec
@@ -160,15 +123,25 @@ pub fn with_channels(d: QoiDecoder, n: Int) -> QoiDecoder
 //     println("${bytes.len(out)}")                         // 0
 // ```
 pub fn feed(d: QoiDecoder, chunk: Bytes) -> (QoiDecoder, Bytes)
-    todo("qoi-nv.qoidec.feed")
+    if d.failure != None or bytes.len(chunk) == 0
+        return (d, bytes.zeros(0))
+    let data = bytes.concat([d.pending, chunk])
+    let consumed = d.consumed + bytes.len(chunk)
+    match d.head
+        Some(h) => drain(d, h, data, 0, consumed)
+        None    =>
+            if bytes.len(data) < qoi.header_size()
+                return (waiting(d, data, consumed), bytes.zeros(0))
+            match header_of(data)
+                Ok(h)  => drain(d, h, data, qoi.header_size(), consumed)
+                Err(e) => (failed(d, e, consumed), bytes.zeros(0))
 
 // End the stream and say whether it was whole.
 //
-// This is where a file that stopped mid-opcode, a file that ran out of
-// pixels before the header's count, and a file whose end marker is
-// missing become errors — none of them can be detected while bytes are
-// still arriving.  `Ok` means the pixel count was reached exactly and
-// the eight-byte marker followed it.
+// A file that stopped mid-opcode, ran out of pixels before the
+// header's count, or lacks its end marker becomes an error here, since
+// none of them shows while bytes are still arriving.  `Ok` means the
+// pixel count was reached exactly and the eight-byte marker followed.
 //
 // ```novo
 // use qoidec
@@ -179,13 +152,12 @@ pub fn feed(d: QoiDecoder, chunk: Bytes) -> (QoiDecoder, Bytes)
 //         Err(_) => println("not whole")                   // this one
 // ```
 pub fn finish(d: QoiDecoder) -> Result<Unit, QoiError>
-    todo("qoi-nv.qoidec.finish")
+    finished(d)!
+    Ok()
 
 // The header, once fourteen bytes have arrived.
 //
-// `None` before that.  A caller who needs the dimensions in order to
-// allocate somewhere to put the pixels feeds the first chunk, asks,
-// and then decides.
+// `None` before that.
 //
 // ```novo
 // use qoidec
@@ -196,13 +168,12 @@ pub fn finish(d: QoiDecoder) -> Result<Unit, QoiError>
 //         None    => println("not yet")                    // this one
 // ```
 pub fn header(d: QoiDecoder) -> ?QoiHeader
-    todo("qoi-nv.qoidec.header")
+    d.head
 
 // The sticky failure, if the decoder has one.
 //
-// Once set it is never cleared: a QOI opcode stream that has lost its
-// place cannot resynchronise, and a decoder that tried would be
-// inventing pixels.
+// Once set it is never cleared: an opcode stream that has lost its
+// place cannot find it again.
 //
 // ```novo
 // use qoidec
@@ -213,7 +184,7 @@ pub fn header(d: QoiDecoder) -> ?QoiHeader
 //         None    => println("clean")                      // this one
 // ```
 pub fn error(d: QoiDecoder) -> ?QoiError
-    todo("qoi-nv.qoidec.error")
+    d.failure
 
 // How many bytes have been consumed across every `feed`.
 //
@@ -224,13 +195,11 @@ pub fn error(d: QoiDecoder) -> ?QoiError
 //     println("${qoidec.total_in(qoidec.decoder())}")      // 0
 // ```
 pub fn total_in(d: QoiDecoder) -> Int
-    todo("qoi-nv.qoidec.total_in")
+    d.consumed
 
 // How many pixels have been produced across every `feed`.
 //
-// Pixels, not bytes: the byte count is this times the channel count,
-// and the pixel count is the one that can be compared with the
-// header's promise.
+// Pixels, not bytes: the byte count is this times the channel count.
 //
 // ```novo
 // use qoidec
@@ -239,13 +208,12 @@ pub fn total_in(d: QoiDecoder) -> Int
 //     println("${qoidec.total_out(qoidec.decoder())}")     // 0
 // ```
 pub fn total_out(d: QoiDecoder) -> Int
-    todo("qoi-nv.qoidec.total_out")
+    d.produced
 
 // Whether the decoder has reached the header's pixel count.
 //
-// True before `finish` has been called and before the end marker has
-// been seen — it is a statement about the pixels, not about the file.
-// A caller streaming into a fixed buffer uses it to stop.
+// It can be true before the end marker has arrived: it is a statement
+// about the pixels, not about the file.
 //
 // ```novo
 // use qoidec
@@ -254,20 +222,16 @@ pub fn total_out(d: QoiDecoder) -> Int
 //     println("${qoidec.is_done(qoidec.decoder())}")       // false
 // ```
 pub fn is_done(d: QoiDecoder) -> Bool
-    todo("qoi-nv.qoidec.is_done")
+    match d.head
+        Some(h) => d.produced >= qoi.pixel_count(h)
+        None    => false
 
 // Decode a whole file held in memory.
 //
-// The common case, and the one almost every caller wants: QOI files
-// are small by design and a whole-buffer decode is a straight line
-// through them.  The header comes back beside the pixels because a
-// caller needs the dimensions to make sense of a flat buffer, and
-// because the informative colorspace byte would otherwise be lost.
-//
-// Everything `finish` checks is checked here — truncation, the pixel
-// count, the end marker, trailing bytes — so an `Ok` from this
-// function is a stronger statement than a sequence of successful
-// `feed` calls.
+// The header comes back beside the pixels, which are at the header's
+// channel count.  Everything `feed` and `finish` check is checked:
+// the header, truncation, the pixel count, the end marker and trailing
+// bytes.
 //
 // ```novo
 // use qoidec
@@ -278,15 +242,15 @@ pub fn is_done(d: QoiDecoder) -> Bool
 //         Err(_) => println("not a QOI file")              // this one
 // ```
 pub fn decode(src: Bytes) -> Result<(QoiHeader, Bytes), QoiError>
-    todo("qoi-nv.qoidec.decode")
+    let (d, out) = feed(decoder(), src)
+    let h = finished(d)!
+    Ok((h, out))
 
 // Read just the header out of a buffer.
 //
-// Fourteen bytes is all it touches, so a caller deciding whether to
-// commit memory to an image asks this first.  It validates the magic,
-// both enumerated bytes and the dimensions, which means an `Ok` here
-// is a promise that `qoi.max_encoded_size` and `qoi.decoded_size` will
-// not overflow.
+// It reads fourteen bytes and checks the magic, both enumerated bytes
+// and the dimensions: neither may be zero, and the image must hold fewer
+// than 400,000,000 pixels, the limit of the reference implementation.
 //
 // ```novo
 // use qoidec
@@ -297,4 +261,178 @@ pub fn decode(src: Bytes) -> Result<(QoiHeader, Bytes), QoiError>
 //         Err(_) => println("not a QOI header")            // this one
 // ```
 pub fn read_header(src: Bytes) -> Result<QoiHeader, QoiError>
-    todo("qoi-nv.qoidec.read_header")
+    let n = bytes.len(src)
+    if n < qoi.header_size()
+        return Err(QoiTruncatedHeader(n, n))
+    header_of(src)
+
+// The largest image this package reads or writes: 400,000,000 pixels,
+// the `QOI_PIXELS_MAX` of the reference implementation.
+fn pixels_max() -> Int
+    400000000
+
+// The header at the start of `src`, which holds at least fourteen
+// bytes, checked field by field.
+fn header_of(src: Bytes) -> Result<QoiHeader, QoiError>
+    let magic = bytes.u32_be_at(src, 0) ?? 0
+    if magic != 1903126886
+        return Err(QoiBadMagic(0, magic))
+    let w = bytes.u32_be_at(src, 4) ?? 0
+    let h = bytes.u32_be_at(src, 8) ?? 0
+    let c = bytes.byte_at(src, 12) ?? 0
+    let s = bytes.byte_at(src, 13) ?? 0
+    if c != 3 and c != 4
+        return Err(QoiBadChannels(12, c))
+    if s > 1
+        return Err(QoiBadColorspace(13, s))
+    check_size(w, h)!
+    let channels = if c == 3
+        QoiRgb
+    else
+        QoiRgba
+    let space = if s == 0
+        QoiSrgbLinearAlpha
+    else
+        QoiAllLinear
+    Ok(QoiHeader { width: w, height: h, channels: channels, space: space })
+
+// Refuses dimensions that hold no pixel, or more than `pixels_max`.
+// The test is the reference implementation's, so the two agree on the
+// largest image.
+fn check_size(w: Int, h: Int) -> Result<Unit, QoiError>
+    if w == 0 or h == 0
+        return Err(QoiZeroDimension(4, w, h))
+    if h >= pixels_max() / w
+        return Err(QoiTooManyPixels(4, w, h))
+    Ok()
+
+// The decoder holding `data` until the header is whole.
+fn waiting(d: QoiDecoder, data: Bytes, consumed: Int) -> QoiDecoder
+    QoiDecoder { head: None, prev: d.prev, seen: d.seen, consumed: consumed, produced: 0,
+                 run_left: 0, pending: data, out_channels: d.out_channels, failure: None }
+
+// The decoder with a failure it keeps.
+fn failed(d: QoiDecoder, e: QoiError, consumed: Int) -> QoiDecoder
+    QoiDecoder { head: d.head, prev: d.prev, seen: d.seen, consumed: consumed,
+                 produced: d.produced, run_left: d.run_left, pending: bytes.zeros(0),
+                 out_channels: d.out_channels, failure: Some(e) }
+
+// The working state of one `feed`: the table and the previous pixel
+// packed one integer a pixel, and the counts.  The decoder value that
+// `feed` answers is built from it once, at the end.
+struct DecodeWork
+    var table: [Int]
+    var prev: Int
+    var produced: Int
+    var run_left: Int
+    var fail: ?QoiError
+
+// Writes one pixel at `o` in `ch` channels and answers the offset past
+// it.
+fn emit(var out: Bytes, o: Int, px: Int, ch: Int) -> Int
+    bytes.set_u8(out, o, (px >> 24) & 255)
+    bytes.set_u8(out, o + 1, (px >> 16) & 255)
+    bytes.set_u8(out, o + 2, (px >> 8) & 255)
+    if ch == 4
+        bytes.set_u8(out, o + 3, px & 255)
+    o + ch
+
+// The pixel the opcode whose first byte `b1` is at `i` produces after
+// `prev`.  A run produces `prev`.
+fn decoded(data: Bytes, i: Int, b1: Int, prev: Int, table: [Int]) -> Int
+    let tag = b1 >> 6
+    if b1 == 254
+        return (qoiop.byte(data, i + 1) << 24) | (qoiop.byte(data, i + 2) << 16)
+               | (qoiop.byte(data, i + 3) << 8) | (prev & 255)
+    if b1 == 255
+        return (qoiop.byte(data, i + 1) << 24) | (qoiop.byte(data, i + 2) << 16)
+               | (qoiop.byte(data, i + 3) << 8) | qoiop.byte(data, i + 4)
+    if tag == 0
+        return table[b1 & 63]
+    if tag == 3
+        return prev
+    var dr = 0
+    var dg = 0
+    var db = 0
+    if tag == 1
+        dr = ((b1 >> 4) & 3) - 2
+        dg = ((b1 >> 2) & 3) - 2
+        db = (b1 & 3) - 2
+    else
+        let b2 = qoiop.byte(data, i + 1)
+        dg = (b1 & 63) - 32
+        dr = dg + ((b2 >> 4) & 15) - 8
+        db = dg + (b2 & 15) - 8
+    let r = ((prev >> 24) + dr) & 255
+    let g = (((prev >> 16) & 255) + dg) & 255
+    let b = (((prev >> 8) & 255) + db) & 255
+    (r << 24) | (g << 16) | (b << 8) | (prev & 255)
+
+// Decodes what `data` holds for the image `h`, from byte `i` of it.
+// `data` starts at file offset `consumed - bytes.len(data)`.  Every
+// opcode that is whole is decoded; the rest waits in `pending`.  Once
+// the header's pixel count is reached, the bytes that follow are the
+// end marker, checked here as soon as eight of them have arrived.
+fn drain(d: QoiDecoder, h: QoiHeader, data: Bytes, start: Int, consumed: Int) -> (QoiDecoder, Bytes)
+    let n = bytes.len(data)
+    let base = consumed - n
+    let total = qoi.pixel_count(h)
+    let ch = if d.out_channels > 0
+        d.out_channels
+    else
+        qoi.channel_count(h.channels)
+    var w = DecodeWork { table: list.map(d.seen.seen, qoiop.pack), prev: qoiop.pack(d.prev),
+                   produced: d.produced, run_left: d.run_left, fail: None }
+    let room = math.min(total - w.produced, w.run_left + 62 * (n - start))
+    var out = bytes.zeros(room * ch)
+    var o = 0
+    var i = start
+    var going = true
+    while going and w.produced < total
+        if w.run_left > 0
+            o = emit(out, o, w.prev, ch)
+            w.produced = w.produced + 1
+            w.run_left = w.run_left - 1
+        else
+            let b1 = qoiop.byte(data, i)
+            let size = qoiop.size_of_tag(b1)
+            if i >= n or i + size > n or w.fail != None
+                going = false
+            else
+                let px = decoded(data, i, b1, w.prev, w.table)
+                w.table[qoiop.hash_packed(px)] = px
+                w.prev = px
+                if (b1 >> 6) == 3 and b1 < 254
+                    let run = (b1 & 63) + 1
+                    w.run_left = math.min(run, total - w.produced)
+                    if run > total - w.produced
+                        w.fail = Some(QoiOutputTooLarge(base + i, total))
+                else
+                    o = emit(out, o, px, ch)
+                    w.produced = w.produced + 1
+                i = i + size
+    let rest = bytes.slice(data, i, n)
+    var fail = w.fail
+    if fail == None and w.produced == total
+        let m = bytes.len(rest)
+        if m >= 8 and bytes.slice(rest, 0, 8) != qoi.end_marker()
+            fail = Some(QoiMissingEndMarker(base + i))
+        elif m > 8
+            fail = Some(QoiTrailingBytes(base + i + 8, m - 8))
+    let next = QoiDecoder { head: Some(h), prev: qoiop.unpack(w.prev),
+                            seen: QoiRunning { seen: list.map(w.table, qoiop.unpack) },
+                            consumed: consumed, produced: w.produced, run_left: w.run_left,
+                            pending: rest, out_channels: d.out_channels, failure: fail }
+    (next, bytes.slice(out, 0, o))
+
+// The header of a stream that ended whole, or the reason it did not.
+fn finished(d: QoiDecoder) -> Result<QoiHeader, QoiError>
+    if let Some(e) = d.failure
+        return Err(e)
+    let Some(h) = d.head else return Err(QoiTruncatedHeader(d.consumed, d.consumed))
+    let total = qoi.pixel_count(h)
+    if d.produced < total
+        return Err(QoiTruncatedStream(d.consumed, total, d.produced))
+    if d.pending != qoi.end_marker()
+        return Err(QoiMissingEndMarker(d.consumed - bytes.len(d.pending)))
+    Ok(h)

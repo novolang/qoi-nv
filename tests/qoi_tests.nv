@@ -1,18 +1,7 @@
-// qoi_tests.nv — the API suite for the header and the size
-// arithmetic.
+// qoi_tests.nv — the header and the size arithmetic.
 //
-// RED ON PURPOSE.  Every body in this package is a `todo()`, so every
-// assertion below reaches `not implemented: qoi-nv.<module>.<fn>` and
-// the suite fails.  That is the expected state of an interface package
-// and it is what makes these tests worth writing NOW: they compile
-// against the signatures, which is the claim being reviewed, and the
-// day a body lands the suite says whether the body agrees with what
-// was promised.
-//
-// Unusually for this grid, these assertions are BINDING rather than
-// illustrative: QOI's specification fixes every number in them, so a
-// body that disagrees with one of these is wrong rather than
-// different.
+// QOI's specification fixes every number here, so a body that disagrees
+// with one is wrong rather than different.
 
 use std.test
 use qoi

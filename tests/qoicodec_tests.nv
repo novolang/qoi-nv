@@ -1,13 +1,9 @@
-// qoicodec_tests.nv — the API suite for the decoder and the encoder.
+// qoicodec_tests.nv — the contract of the decoder and the encoder.
 //
-// RED ON PURPOSE: every body is a `todo()`.  See qoi_tests.nv for why
-// an interface package ships a failing suite.
-//
-// What these assert is the CONTRACT rather than the compression: that
-// a fresh decoder is clean and knows nothing, that an empty chunk is
-// not an end of stream, that a failure is sticky, that `finish` is
-// where truncation and the end marker are checked, and that the
-// encoder holds a run back until something ends it.
+// A fresh decoder is clean and knows nothing, an empty chunk is not an
+// end of stream, a failure is kept, `finish` is where truncation and the
+// end marker are checked, and the encoder holds a run open until
+// something ends it.
 
 use std.test
 use qoi
@@ -97,7 +93,7 @@ fn test_a_fresh_encoder_has_written_nothing() [io]
 fn test_start_writes_the_header_and_nothing_else() [io]
     test.case("fourteen bytes, and the offset moves by fourteen")
     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
-    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+    var w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
     test.assert(w.at == 14)
     test.assert(qoienc.total_out(w.enc) == 14)
     test.assert(qoienc.total_in(w.enc) == 0)
@@ -106,7 +102,7 @@ fn test_start_writes_the_header_and_nothing_else() [io]
 fn test_push_takes_a_pixel_and_usually_writes_nothing() [io]
     test.case("the first pixel opens a run rather than emitting bytes")
     let h = QoiHeader { width: 2, height: 1, channels: QoiRgba, space: QoiAllLinear }
-    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+    var w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
     let w2 = qoienc.push(w.enc, srgb.opaque(srgb.black()), w.buf, w.at)
 
     test.case("so the pixel count moved and the offset did not")
@@ -117,7 +113,7 @@ fn test_push_takes_a_pixel_and_usually_writes_nothing() [io]
 fn test_pushing_samples_counts_pixels_and_not_bytes() [io]
     test.case("three bytes at three channels is one pixel")
     let h = QoiHeader { width: 1, height: 1, channels: QoiRgb, space: QoiAllLinear }
-    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
+    var w = qoienc.start(qoienc.encoder(h), bytes.zeros(64), 0)
     let w2 = qoienc.push_samples(w.enc, bytes.zeros(3), 3, w.buf, w.at)
     test.assert(qoienc.total_in(w2.enc) == 1)
 
@@ -125,7 +121,7 @@ fn test_pushing_samples_counts_pixels_and_not_bytes() [io]
 fn test_finishing_with_the_wrong_pixel_count_is_refused() [io]
     test.case("a file nothing could read is better caught here")
     let h = QoiHeader { width: 4, height: 4, channels: QoiRgb, space: QoiAllLinear }
-    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(qoi.max_encoded_size(h)), 0)
+    var w = qoienc.start(qoienc.encoder(h), bytes.zeros(qoi.max_encoded_size(h)), 0)
     match qoienc.finish(w.enc, w.buf, w.at)
         Ok(_)  => test.fail("zero pixels accepted for a 16-pixel image")
         Err(e) => test.assert(qoierror.image_is_complete(e) == false)
@@ -134,7 +130,7 @@ fn test_finishing_with_the_wrong_pixel_count_is_refused() [io]
 fn test_a_buffer_sized_by_max_encoded_size_cannot_overflow() [io]
     test.case("one pixel into a buffer sized for one pixel")
     let h = QoiHeader { width: 1, height: 1, channels: QoiRgba, space: QoiAllLinear }
-    let w = qoienc.start(qoienc.encoder(h), bytes.zeros(qoi.max_encoded_size(h)), 0)
+    var w = qoienc.start(qoienc.encoder(h), bytes.zeros(qoi.max_encoded_size(h)), 0)
     let w2 = qoienc.push(w.enc, srgb.opaque(srgb.white()), w.buf, w.at)
     match qoienc.error(w2.enc)
         Some(_) => test.fail("a correctly sized buffer overflowed")

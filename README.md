@@ -7,11 +7,6 @@ opcodes, the sixty-four-entry running array, a decoder, and an encoder. The
 pixel type comes from [color-nv](https://novo-lang.org/packages/color-nv),
 which is the only dependency.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared with
-its full signature, but every body is a `todo()` that panics when called. The
-package is published so its design can be reviewed and depended on before it
-is implemented. Version 0.1.0 will be the first working release.
-
 ## What it is
 
 A QOI file is a fourteen-byte header followed by a sequence of **opcodes** and
@@ -96,11 +91,6 @@ fn main() [io]
         Err(e) => println("${qoierror.offset_of(e)}")
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test` fails
-on purpose: every test reaches a `not implemented: qoi-nv.<module>.<fn>`
-panic. The tests are the specification the implementation will have to
-satisfy.
-
 ## What the package contains
 
 | Module | Contents |
@@ -127,10 +117,11 @@ as they come.
 one call is what you want.
 
 **`qoienc.encoder`, `start`, `push` and `finish` write into a buffer you
-own.** `qoi.max_encoded_size` says exactly how large that buffer must be, so a
-caller encoding a hundred frames allocates once, and a caller writing into the
-middle of a larger buffer needs no copy afterwards. `push_samples` takes a
-whole row of packed samples rather than one pixel.
+own.** The buffer is passed as a `var` name and written in place.
+`qoi.max_encoded_size` says how large it must be, so a caller encoding a
+hundred frames allocates once, and a caller writing into the middle of a
+larger buffer needs no copy afterwards. `push_samples` takes a whole row of
+packed samples rather than one pixel.
 
 **`qoiop` on its own is the format's arithmetic with no stream around it.**
 `read_op`, `apply`, `remember` and `choose` are what an inspector, a converter
@@ -140,8 +131,7 @@ or a device driver reaches for.
 
 1. **A run of 63 and a run of 64 do not exist.** `11111110` and `11111111` are
    the two literal tags, so `QoiOpRun` stops at 62. An encoder that emitted a
-   longer run writes a file whose next pixel is read as a literal. This single
-   interaction is the only subtle thing in the format.
+   longer run writes a file whose next pixel is read as a literal.
 2. **The running array is addressed by a hash, not by recency.** The position
    is `(r * 3 + g * 5 + b * 7 + a * 11) % 64`. Nothing about those multipliers
    is optimal, and changing one produces a format nothing else can read.
@@ -167,18 +157,18 @@ or a device driver reaches for.
    `qoidec.error` is what asks, and once it is set every later `feed` produces
    nothing. `qoierror.image_is_complete` says whether the pixels so far are
    usable.
-9. **`push` usually writes nothing, and `finish` is not optional.** A run
-   spans pixels, so `push` holds an open run rather than emitting it. A caller
-   who stops without calling `finish` loses the tail of their image and the
-   end marker.
+9. **`push` often writes nothing, and `finish` is not optional.** A run spans
+   pixels, so `push` holds a run open until it reaches 62, a different pixel
+   arrives, or the image's last pixel does. `finish` writes the end marker,
+   and refuses an image that is missing pixels.
 10. **An encoder has nothing to choose.** The specification fixes the
     preference order: index, then diff, then luma, then a literal. There is no
     compression level, no strategy and no window size, so two conforming
     encoders produce byte-identical files from the same pixels.
-11. **Every decoder and encoder function answers a new value rather than
-    changing one.** `[mutate]` is a host effect and this package has none,
-    which is also what makes a decoder safe to keep, fork or feed from two
-    places.
+11. **A decoder or an encoder is never changed by a call; each call answers a
+    new one.** A decoder can be kept, or fed from two places. The one thing a
+    call writes into is the encoder's output buffer, which is the caller's
+    own.
 12. **The channels byte and the colour space byte are refused at undefined
     values.** Both are informative and a lenient reader would still conform.
     This one is strict: a file that disagrees with the specification in a
@@ -188,51 +178,31 @@ or a device driver reaches for.
 14. **`qoidec.with_channels` drains a fixed channel count rather than the
     header's.** The reference implementation has the same parameter. Nothing
     in the format requires it.
-15. **Every error carries a byte offset counted from the first byte of the
+15. **An image of 400,000,000 pixels or more is refused.** That is the
+    `QOI_PIXELS_MAX` of the reference implementation, `qoi.h`. Below it every
+    size this package computes fits in an `Int`.
+16. **A three-channel image is opaque.** The encoder takes a pixel pushed into
+    a three-channel image as opaque whatever its alpha, so the file never
+    changes alpha and stays within `qoi.max_encoded_size`.
+17. **Channel differences wrap at 256.** A red channel going from 255 to 0 is a
+    difference of 1 and codes as `QoiOpDiff`, as it does in `qoi.h`.
+18. **Every error carries a byte offset counted from the first byte of the
     file.** A QOI file is not a thing a person edited, so a line number would
     mean nothing. The offset is across every chunk, because a caller feeding
     64 KiB at a time does not know where a chunk started either.
 
-## Running on a microcontroller
-
-The claim in this package's manifest is that its opcode arithmetic runs on a
-device with no heap allocator. **That claim rests on the code and is not yet
-checked by a build.** `tests/embedded_probe.nv` is written as the firmware
-that would check it, and today it does not compile:
-
-```bash
-novo build --target=nrf52-qemu tests/embedded_probe.nv
-```
-
-fails with two `cannot infer the type of this expression` errors, on the two
-lines that name a type from color-nv. `novo build` given a file outside `src/`
-loads the package's own modules and does not resolve its registry
-dependencies, so `use srgb` finds nothing and every value of a color-nv type
-becomes untyped. The probe is kept rather than deleted, because deleting it
-would remove the claim's only description.
-
-What the probe describes is the decoder's inner loop: apply an opcode, hash
-the pixel, write it back to the table. QOI's state is a few hundred bytes, and
-a decoder that streams into a display's framebuffer never holds an image, so a
-microcontroller driving a small panel from a flash chip is the use this
-arrangement is for.
-
-The `Bytes`, `Str` and `Result` half of the package is outside the claim in
-any case. None of the three is available on the device target today, so the
-honest statement is that QOI's arithmetic runs on a device and QOI's buffer
-surface does not.
-
 ## What is not included
 
-- **A `read_all` that pumps a stream for you.** flate-nv and png-nv both have
-  one. A QOI file expands to width times height times channels bytes with no
-  compression state, so a caller who cannot hold the whole input certainly
-  cannot hold the whole output. `decode` is honest about needing both, and
+- **A `read_all` that pumps a stream for you.** A QOI file expands to width
+  times height times channels bytes, so a caller who cannot hold the whole
+  input cannot hold the whole output either. `decode` takes both whole, and
   `feed` is for a caller who can hold neither.
+- **A device build.** The pixel type is color-nv's `Srgba8`, a plain struct,
+  and a build for a microcontroller with no heap refuses to construct one.
+  So no module here claims to run on a device.
 - **A checksum.** The format has none. See rule 7.
-- **Any part of the format.** The specification is one page and this interface
-  covers all of it. Anything the implementation cannot do is a defect to
-  report, not a scope decision.
+- **Any part of the format.** The specification is one page and this package
+  covers all of it. Anything it cannot do is a defect to report.
 
 ## Related packages
 
@@ -250,52 +220,32 @@ surface does not.
 ## Tests
 
 ```bash
-novo test tests/qoi_tests.nv        # the header and the size arithmetic
-novo test tests/qoiop_tests.nv      # the six opcodes and the running array
-novo test tests/qoicodec_tests.nv   # the decoder and the encoder
+novo test tests/corpus_tests.nv    # one suite; the table below lists them all
+bash tests/coverage.sh             # every suite, and the line coverage of src/
 ```
 
-The reference implementation is `qoi.h`, Dominic Szablewski's single-file C
-version, and the oracle is [the QOI test images](https://qoiformat.org/benchmark/).
+| Suite | What it asserts |
+| --- | --- |
+| `qoi_tests.nv`, `qoiop_tests.nv`, `qoicodec_tests.nv` | The header, the opcodes, the running array, and the contract of the decoder and the encoder |
+| `corpus_tests.nv` | Four images of the official test set, decoded to the pixels of their PNG twins and encoded back to the same bytes |
+| `differential_tests.nv` | 17 images built to reach each opcode, runs of 61 to 125 pixels, and differences that wrap, against the Python codec in `tools/qoiref.py` |
+| `stream_tests.nv` | Decoding in chunks of every size, every refusal at its offset, and every opcode written, read and applied |
 
-These assertions are binding rather than illustrative. The specification fixes
-the opcode sizes, the hash multipliers, both initial states and the maximum
-run, so a body that disagrees with one of them is wrong rather than different.
-The codec suite asserts the contract instead: that a fresh decoder knows
-nothing, that an empty chunk is not an end of stream, that a failure is
-sticky, that truncation and the end marker are checked in `finish`, and that
-the encoder holds a run back until something ends it.
+The reference implementation is `qoi.h`, Dominic Szablewski's single-file C
+codec. The oracle is the [QOI test images](https://qoiformat.org/qoi_test_images.zip)
+published beside it. `tests/images/` holds the four smallest: `edgecase.qoi`,
+`qoi_logo.qoi`, `testcard.qoi` and `testcard_rgba.qoi`. `edgecase.qoi` uses
+opcodes an encoder would not choose, so it is checked by decoding only.
+
+`tools/qoiref.py` is a second codec, written in Python from the specification
+the way `qoi.h` behaves, with a PNG reader built on `zlib`.
+`python3 tools/qoiref.py check <dir>` checks it against every image of the
+official set, the large ones included. `corpus` and `differential` write the
+two suites that compare this package with it.
 
 Because the format leaves an encoder nothing to choose, the correctness
-condition here is byte equality with the reference encoder rather than a round
+condition is byte equality with the reference encoder rather than a round
 trip.
-
-The tests compile today and fail at run, each on the
-`not implemented: qoi-nv.<module>.<fn>` panic that is its body. That is the
-expected state of an interface release. They turn green one at a time as
-bodies land. `novo test --isolate tests/<file>` prints one verdict per test.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `qoi.QoiHeader`, `.QoiChannels`, `.QoiSpace` | the types are declared; nothing constructs one |
-| `qoi.magic`, `.is_qoi`, `.end_marker`, `.header_size` | no |
-| `qoi.channel_count`, `.space_byte`, `.pixel_count` | no |
-| `qoi.decoded_size`, `.max_encoded_size`, `.write_header` | no |
-| `qoiop.QoiOp`, `.QoiRunning` | the types are declared; nothing constructs one |
-| `qoiop.op_name`, `.op_size`, `.op_pixels`, `.index_of` | no |
-| `qoiop.running_new`, `.running_len`, `.remember`, `.recall` | no |
-| `qoiop.apply`, `.choose`, `.read_op`, `.write_op` | no |
-| `qoidec.QoiDecoder` | the type is declared; nothing constructs one |
-| `qoidec.decoder`, `.with_channels`, `.feed`, `.finish` | no |
-| `qoidec.header`, `.error`, `.total_in`, `.total_out`, `.is_done` | no |
-| `qoidec.decode`, `.read_header` | no |
-| `qoienc.QoiEncoder`, `.QoiWrite` | the types are declared; nothing constructs one |
-| `qoienc.encoder`, `.start`, `.push`, `.push_samples`, `.finish` | no |
-| `qoienc.error`, `.total_in`, `.total_out`, `.encode` | no |
-| `qoierror.QoiError` | the type is declared; nothing constructs one |
-| `qoierror.offset_of`, `.image_is_complete` | no |
 
 ## Licence
 
