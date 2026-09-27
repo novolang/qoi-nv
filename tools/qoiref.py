@@ -331,7 +331,6 @@ def differential():
 // same pixels.
 
 use std.test
-use qoi
 use qoidec
 use qoienc
 

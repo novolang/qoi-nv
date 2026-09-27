@@ -23,7 +23,6 @@
 
 use qoi
 use qoiop
-use qoierror
 use srgb
 
 // A decoder between chunks.

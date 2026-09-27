@@ -7,7 +7,6 @@
 // built from a good one by changing the one thing the case is about.
 
 use std.test
-use std.list
 use srgb
 use qoi
 use qoiop
@@ -37,13 +36,12 @@ fn sample_file() -> Bytes
 fn chunked(file: Bytes, step: Int) -> (Bytes, Bool)
     var d = qoidec.decoder()
     var pixels = bytes.zeros(0)
-    var at = 0
-    while at < bytes.len(file)
-        let end = math.min(at + step, bytes.len(file))
-        let (next, out) = qoidec.feed(d, bytes.slice(file, at, end))
+    for at in 0..(bytes.len(file) + step - 1) / step
+        let start = at * step
+        let end = math.min(start + step, bytes.len(file))
+        let (next, out) = qoidec.feed(d, bytes.slice(file, start, end))
         pixels = bytes.concat([pixels, out])
         d = next
-        at = end
     (pixels, qoidec.finish(d) == Ok())
 
 // The error `decode` refuses a file with, as its message.

@@ -24,7 +24,6 @@
 use qoi
 use qoiop
 use qoidec
-use qoierror
 use srgb
 
 // An encoder between pixels.
