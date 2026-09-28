@@ -315,9 +315,11 @@ def differential():
             assert decode(qoi)[4] == pixels
             cases.append((style, w, h, channels, pixels, qoi))
     # A run of exactly 62 and of 63 pixels, and a run that ends the image.
+    # The colour space byte follows the rule above, 1 for four channels,
+    # because `agrees` builds the header it encodes with by that rule.
     for n in (61, 62, 63, 124, 125):
         pixels = b'\x00\x00\x00\xff' * n + b'\x05\x06\x07\xff'
-        cases.append(('run of %d' % n, n + 1, 1, 4, pixels, encode(n + 1, 1, 4, 0, pixels)))
+        cases.append(('run of %d' % n, n + 1, 1, 4, pixels, encode(n + 1, 1, 4, 1, pixels)))
     out = open('tests/differential_tests.nv', 'w')
     out.write('''// differential_tests.nv — this codec against the Python reference
 // codec in tools/qoiref.py.

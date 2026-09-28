@@ -1,9 +1,14 @@
 # Changelog
 
-## 0.1.0 — 2026-09-27
+## 0.1.0 — 2026-09-28
 
 The first implementation of the interface published as 0.0.1: the
 whole format, decoded and encoded.
+
+The differential fixture writes colour space 1 in every four-channel
+case, as the header the test encodes with does.  The streaming suite
+expects 32 bytes as the largest 2 by 1 RGBA file, the size qoi.h gives,
+and the offsets the reference encoder reaches.
 
 ### Added
 
@@ -31,7 +36,7 @@ These break code written against 0.0.x.
   writes only the end marker.
 - A pixel pushed into a three-channel image is taken as opaque.
 - The dependency is color-nv `^0.1.1`, and the toolchain floor is
-  0.13.0.
+  0.14.0.
 
 ### Removed
 
