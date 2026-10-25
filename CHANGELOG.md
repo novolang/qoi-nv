@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.1 — 2026-10-25
+
+A call that passes a variable to a `var` parameter now writes the `var` marker, which the 0.21.1 compiler asks for (E2050).  The package needs Novo 0.21.1 or later.  A file that names a sibling module's type, function or constant now has the `use` line for that module (E2033, E2003).  No signature and no behaviour changed.
+
 ## 0.1.0 — 2026-09-28
 
 The first implementation of the interface published as 0.0.1: the

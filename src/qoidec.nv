@@ -24,6 +24,7 @@
 use qoi
 use qoiop
 use srgb
+use qoierror
 
 // A decoder between chunks.
 //
@@ -389,7 +390,7 @@ fn drain(d: QoiDecoder, h: QoiHeader, data: Bytes, start: Int, consumed: Int) ->
     var going = true
     while going and w.produced < total
         if w.run_left > 0
-            o = emit(out, o, w.prev, ch)
+            o = emit(var out, o, w.prev, ch)
             w.produced = w.produced + 1
             w.run_left = w.run_left - 1
         else
@@ -407,7 +408,7 @@ fn drain(d: QoiDecoder, h: QoiHeader, data: Bytes, start: Int, consumed: Int) ->
                     if run > total - w.produced
                         w.fail = Some(QoiOutputTooLarge(base + i, total))
                 else
-                    o = emit(out, o, px, ch)
+                    o = emit(var out, o, px, ch)
                     w.produced = w.produced + 1
                 i = i + size
     let rest = bytes.slice(data, i, n)

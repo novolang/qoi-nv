@@ -1,6 +1,6 @@
 [package]
 name        = "qoi-nv"
-version     = "0.1.0"
+version     = "0.1.1"
 description = "The Quite OK Image format, whole: the fourteen-byte header, all six opcodes and the sixty-four-entry running array, decoded by a feed-and-drain state machine the host pumps or in one call over a buffer, and encoded into a buffer the caller supplies at a size this package can tell them exactly."
 license     = "Apache-2.0"
 
@@ -23,7 +23,7 @@ category    = "graphics"
 tags        = ["qoi", "image", "codec", "lossless", "sans-io", "encoder", "decoder", "rgba"]
 repository  = "https://github.com/novolang/qoi-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.14.0"
+novo        = ">= 0.21.1"
 
 # A library: no `main`, so `novo pkg build` type-checks and
 # effect-checks every module under `src/` and writes no binary.

@@ -25,6 +25,7 @@ use qoi
 use qoiop
 use qoidec
 use srgb
+use qoierror
 
 // An encoder between pixels.
 //
@@ -122,7 +123,7 @@ pub fn start(e: QoiEncoder, var out: Bytes, at: Int) -> QoiWrite
     if at + qoi.header_size() > bytes.len(out)
         s.fail = Some(QoiBufferTooSmall(at, qoi.max_encoded_size(e.head), bytes.len(out)))
     else
-        qoi.write_header(e.head, out, at)
+        qoi.write_header(e.head, var out, at)
         s.produced = s.produced + qoi.header_size()
         next = at + qoi.header_size()
     QoiWrite { enc: close_work(e, s), buf: out, at: next }
@@ -150,7 +151,7 @@ pub fn start(e: QoiEncoder, var out: Bytes, at: Int) -> QoiWrite
 // ```
 pub fn push(e: QoiEncoder, px: Srgba8, var out: Bytes, at: Int) -> QoiWrite
     var s = open_work(e)
-    let next = put_pixel(s, e.head, out, at, qoiop.pack(px))
+    let next = put_pixel(var s, e.head, var out, at, qoiop.pack(px))
     QoiWrite { enc: close_work(e, s), buf: out, at: next }
 
 // Hand the encoder a whole row of packed samples.
@@ -186,7 +187,7 @@ pub fn push_samples(e: QoiEncoder, row: Bytes, channels: Int, var out: Bytes, at
             255
         let px = (qoiop.byte(row, i) << 24) | (qoiop.byte(row, i + 1) << 16)
                  | (qoiop.byte(row, i + 2) << 8) | a
-        next = put_pixel(s, e.head, out, next, px)
+        next = put_pixel(var s, e.head, var out, next, px)
         i = i + channels
     QoiWrite { enc: close_work(e, s), buf: out, at: next }
 
@@ -296,8 +297,8 @@ pub fn encode(h: QoiHeader, samples: Bytes) -> Result<Bytes, QoiError>
     if n > total * ch
         return Err(QoiOutputTooLarge(total * ch, total))
     var out = bytes.zeros(qoi.max_encoded_size(h))
-    let w0 = start(encoder(h), out, 0)
-    let w1 = push_samples(w0.enc, samples, ch, out, w0.at)
+    let w0 = start(encoder(h), var out, 0)
+    let w1 = push_samples(w0.enc, samples, ch, var out, w0.at)
     let (_, end) = finish(w1.enc, out, w1.at)!
     Ok(bytes.slice(out, 0, end))
 
@@ -328,7 +329,7 @@ fn put_op(var w: EncodeWork, h: QoiHeader, var out: Bytes, at: Int, op: QoiOp) -
     if at + size > bytes.len(out)
         w.fail = Some(QoiBufferTooSmall(at, qoi.max_encoded_size(h), bytes.len(out)))
         return at
-    qoiop.write_op(op, out, at)
+    qoiop.write_op(op, var out, at)
     w.produced = w.produced + size
     at + size
 
@@ -354,11 +355,11 @@ fn put_pixel(var w: EncodeWork, h: QoiHeader, var out: Bytes, at: Int, given: In
     if px == w.prev
         w.run = w.run + 1
         if w.run == 62 or w.consumed == total
-            next = put_op(w, h, out, next, QoiOpRun(w.run))
+            next = put_op(var w, h, var out, next, QoiOpRun(w.run))
             w.run = 0
         return next
     if w.run > 0
-        next = put_op(w, h, out, next, QoiOpRun(w.run))
+        next = put_op(var w, h, var out, next, QoiOpRun(w.run))
         w.run = 0
     let at_hash = qoiop.hash_packed(px)
     let in_table = w.table[at_hash] == px
@@ -366,4 +367,4 @@ fn put_pixel(var w: EncodeWork, h: QoiHeader, var out: Bytes, at: Int, given: In
         w.table[at_hash] = px
     let prev = w.prev
     w.prev = px
-    put_op(w, h, out, next, qoiop.choose_packed(px, prev, in_table))
+    put_op(var w, h, var out, next, qoiop.choose_packed(px, prev, in_table))

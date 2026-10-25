@@ -12,6 +12,7 @@
 use std.test
 use qoidec
 use qoienc
+use qoi
 
 fn agrees(w: Int, h: Int, channels: Int, pixels_hex: Str, qoi_hex: Str) -> Bool
     let pixels = bytes.from_hex(pixels_hex) ?? bytes.zeros(0)
